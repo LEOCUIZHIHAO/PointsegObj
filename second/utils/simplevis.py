@@ -113,7 +113,7 @@ def point_to_vis_bev(points,
     if voxel_size is None:
         voxel_size = [0.1, 0.1, 0.1]
     if coors_range is None:
-        coors_range = [-50, -50, -3, 50, 50, 1]
+        coors_range = [0, -30, -3, 64, 30, 1]
     voxel_size[2] = coors_range[5] - coors_range[2]
     bev_map = points_to_bev(
         points, voxel_size, coors_range, max_voxels=max_voxels)
@@ -199,12 +199,12 @@ def draw_box_in_bev(img,
     return img
 
 
-def kitti_vis(points, boxes=None, labels=None):
+def kitti_vis(points, boxes=None, labels=None, label_color=None):
     vis_voxel_size = [0.1, 0.1, 0.1]
-    vis_point_range = [0, -30, -3, 64, 30, 1]
+    vis_point_range = [0, -40, -3, 70.4, 40, 1] #[0, -30, -3, 64, 30, 1]
     bev_map = point_to_vis_bev(points, vis_voxel_size, vis_point_range)
     if boxes is not None:
-        bev_map = draw_box_in_bev(bev_map, vis_point_range, boxes, [0, 255, 0], 2, labels)
+        bev_map = draw_box_in_bev(bev_map, vis_point_range, boxes, [0, 255, 0], 2, labels, label_color)
 
     return bev_map
 

@@ -115,6 +115,26 @@ def Voxel3DStack2D(voxels, coors, num_points):
     _, num_points = npi.group_by(coords_xy[1:]).sum(num_points)
     return voxels, _coors, num_points
 
+def prepare_loss_weights(labels, dtype="float32"):
+
+    pos_cls_weight=1.0 
+    neg_cls_weight=1.0
+
+    cared = labels >= 0
+    print("label ", np.unique(labels, return_counts=True))
+    # cared: [N, num_anchors]
+    positives = labels > 0
+    negatives = labels == 0
+    negative_cls_weights = negatives.astype(dtype) * neg_cls_weight
+    posetive_cls_weights = positives.astype(dtype) * pos_cls_weight #(1, 107136)
+    cls_weights = negative_cls_weights + posetive_cls_weights
+    reg_weights = positives.astype(dtype)
+
+    pos_normalizer = np.sum(positives, 1, keepdims=True).astype(dtype)
+    reg_weights /= np.clip(pos_normalizer, a_min=1.0, a_max=None) #(1, 107136)
+    cls_weights /= np.clip(pos_normalizer, a_min=1.0, a_max=None) #(1, 107136)
+
+    return cls_weights, reg_weights, cared
 
 generate_anchors_cachae = False #True FOR Pillar/Seocnd, False For BCL
 phase = "train" #"eval", "train"
@@ -142,11 +162,11 @@ for example in tqdm(dataloader):
     reg_targets = example['reg_targets']
     labels = example['labels']
     
-    #print('seg_points', seg_points.shape)
-    #print("seg_labels", seg_labels.shape)
-    print("reg_targets", reg_targets.shape)
-    print("labels", labels.shape)
+    cls_weights, reg_weights, cared = prepare_loss_weights(labels)
 
+    #print("cls_weights", np.unique(cls_weights, return_counts=True))
+    #print("reg_weights", np.unique(reg_weights, return_counts=True))
+    #print("cared", np.unique(cared, return_counts=True))
 
 ################################################################################
 #     voxels_arr.append(len(voxels))

@@ -2,9 +2,10 @@ import os
 import fire
 import caffe
 from caffe import layers as L, params as P
-from models import bcl_model_v2, bcl_model_v3, bcl_model_v4
+from models import bcl_model_v2, bcl_model_v3, bcl_model_v4, seg_obj
 from solver import solver_function
 from tools import some_useful_tools as sut
+
 
 def Train_Solver(exp_dir, trian_proto_path, pretrained, visual_log):
     if visual_log==True:
@@ -27,7 +28,7 @@ def Train_Solver(exp_dir, trian_proto_path, pretrained, visual_log):
                                             weight_decay= 0.0001, # 0.0001,
                                             iter_size=2, #'number of mini-batches per iteration', batchsize*itersize = real_batch size
                                             display=50,
-                                            random_seed=19930416,
+                                            random_seed=0,
                                             log_path=log_path)
     return solver
 
@@ -57,8 +58,10 @@ def caffe_model(args, restore, pretrained, start_eval, visual_log):
 
     if not start_eval:
 
-        train_net = bcl_model_v3.bilateral_baseline(phase='train', dataset_params=args)
-        eval_net = bcl_model_v3.bilateral_baseline(phase='eval', dataset_params=args)
+        train_net = seg_obj.seg_object_detection(phase='train', dataset_params=args)
+        eval_net = seg_obj.seg_object_detection(phase='eval', dataset_params=args)
+        # train_net = bcl_model_v3.bilateral_baseline(phase='train', dataset_params=args)
+        # eval_net = bcl_model_v3.bilateral_baseline(phase='eval', dataset_params=args)
 
         sut.write_proto([trian_proto_path, train_net],[eval_proto_path, eval_net])
 
@@ -90,7 +93,7 @@ def caffe_model(args, restore, pretrained, start_eval, visual_log):
 
     solver.train_model()
 
-def train(config_path, model_dir, restore=False, pretrained=False, start_eval=True, visual_log=False):
+def train(config_path, model_dir, restore=False, pretrained=False, start_eval=False, visual_log=False):
     args = {}
     args['config_path'] = config_path
     args['model_dir'] = model_dir

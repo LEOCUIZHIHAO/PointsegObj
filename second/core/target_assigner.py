@@ -125,6 +125,7 @@ class TargetAssigner:
                 prune_anchor_fn = lambda _: np.where(anchors_mask_class)[0]
             else:
                 prune_anchor_fn = None
+            
             # print(f"num of {class_name}:", np.sum(mask))
 
             """ here make the number of proposals anchors\
@@ -135,12 +136,12 @@ class TargetAssigner:
                 gt_boxes[mask],
                 similarity_fn,
                 box_encoding_fn,
-                prune_anchor_fn=prune_anchor_fn,
+                prune_anchor_fn=prune_anchor_fn, #None
                 gt_classes=gt_classes[mask],
                 matched_threshold=anchor_dict["matched_thresholds"],
                 unmatched_threshold=anchor_dict["unmatched_thresholds"],
-                positive_fraction=self._positive_fraction,
-                rpn_batch_size=self._sample_size,
+                positive_fraction=self._positive_fraction, #None
+                rpn_batch_size=self._sample_size, #512
                 norm_by_num_examples=False,
                 box_code_size=self.box_coder.code_size,
                 gt_importance=importance)

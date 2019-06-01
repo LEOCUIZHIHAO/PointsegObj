@@ -125,7 +125,6 @@ def create_target_np(all_anchors,
             anchor_by_gt_overlap = anchor_by_gt_overlap[:, empty_gt_mask]
             gt_classes = gt_classes[empty_gt_mask]
             gt_boxes = gt_boxes[empty_gt_mask]
-            print("didi")
         """
         # Find all anchors that share the max overlap amount
         # (this includes many ties)

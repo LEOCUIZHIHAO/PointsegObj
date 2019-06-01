@@ -111,35 +111,21 @@ class InputKittiData(caffe.Layer):
         self.voxel_generator, self.target_assigner = build_network(self.model_cfg)
         self.dataloader = self.load_dataloader(self.input_cfg, self.eval_input_cfg, self.model_cfg)
 
+        # for point segmentation detection
         for example in self.dataloader:
-            voxels = example['voxels']
-            coors = example['coordinates']
-            num_points = example['num_points']
-            labels = example['labels']
+            cls_labels = example['labels']
             reg_targets =example['reg_targets']
-            gt_coords = example['gt_boxes_coords']
-            pos_reg_targets =example['pos_reg_targets']
-            pos_labels =example['pos_labels']
+            seg_points = example['seg_points']
+            seg_labels =example['seg_labels']
             break
-
         self.data_iter = iter(self.dataloader)
-        # For pillar
-        # voxels= self.VoxelFeatureNet(voxels, coors, num_points) #(V,100,C) -> (B, C, V, N)
 
-        #For new method
-        reg_targets, labels = self.GroundTruth2FeatMap(labels, reg_targets, gt_coords, self.fp_w, self.fp_h)
-        # reg_targets, labels = self.GroundTruth2FeatMap(pos_labels, pos_reg_targets, gt_coords, self.fp_w, self.fp_h)
-        reg_targets = reg_targets.reshape(1,-1, reg_targets.shape[-1])
-        labels = labels.reshape(1,-1)
+        # for point object segmentation
 
-        # For BCL
-        voxels = voxels.transpose(2, 1, 0) #(V=fixed,N=1,C=4) -> (C=4, N=1, V=fixed)
-        voxels = np.expand_dims(voxels, axis=0) # (C=4, N=1, V=fixed) -> (B=1, C=4, N=1, V=fixed)
-
-        top[0].reshape(*voxels.shape)
-        top[1].reshape(*coors.shape)
-        top[2].reshape(*labels.shape) #[1 107136]
-        top[3].reshape(*reg_targets.shape) #[]
+        top[0].reshape(*seg_points.shape)
+        top[1].reshape(*seg_labels.shape) #[1 107136]
+        top[2].reshape(*cls_labels.shape) #[]
+        top[3].reshape(*reg_targets.shape)
 
     def reshape(self, bottom, top):
         pass
@@ -151,36 +137,25 @@ class InputKittiData(caffe.Layer):
             self.data_iter = iter(self.dataloader)
             example = next(self.data_iter)
 
-        example.pop("metrics")
-        voxels = example['voxels'] #(V,NPints,4)
-        coors = example['coordinates'] #(V,4) bzyz
-        num_points = example['num_points'] #(V,)
-        labels = example['labels']
-        reg_targets =example['reg_targets']
-        gt_coords = example['gt_boxes_coords']
-        pos_reg_targets =example['pos_reg_targets']
-        pos_labels =example['pos_labels']
+        cls_labels = example['labels']
+        reg_targets = example['reg_targets']
+        seg_points = example['seg_points']
+        seg_labels = example['seg_labels']
+        
+        """shuffle car seg points"""
+        indices = np.arange(seg_labels.shape[1])
+        np.random.shuffle(indices)
+        seg_points = seg_points[:,indices]
+        seg_labels = seg_labels[:,indices]
 
-        #for new method
-        reg_targets, labels = self.GroundTruth2FeatMap(labels, reg_targets, gt_coords, self.fp_w, self.fp_h)
-        # reg_targets, labels = self.GroundTruth2FeatMap(pos_labels, pos_reg_targets, gt_coords, self.fp_w, self.fp_h)
-        reg_targets = reg_targets.reshape(1,-1, pos_reg_targets.shape[-1])
-        labels = labels.reshape(1,-1)
-
-        # for pillar
-        # voxels = self.VoxelFeatureNet(voxels, coors, num_points) #(V,100,C) -> (B, C, V, N)
-
-        # for bcl
-        voxels = voxels.transpose(2, 1, 0) #(V=fixed,N=1,C=4) -> (C=4, N=1, V=fixed)
-        voxels = np.expand_dims(voxels, axis=0) # (C=4, N=1, V=fixed) -> (B=1, C=4, N=1, V=fixed)
-
-        top[0].reshape(*voxels.shape)
-        top[1].reshape(*coors.shape)
-        top[2].reshape(*labels.shape) #[1 107136]
-        top[3].reshape(*reg_targets.shape) #[]
-        top[0].data[...] = voxels
-        top[1].data[...] = coors
-        top[2].data[...] = labels
+        # for point object segmentation
+        top[0].reshape(*seg_points.shape)
+        top[1].reshape(*seg_labels.shape)
+        top[2].reshape(*cls_labels.shape)
+        top[3].reshape(*reg_targets.shape)
+        top[0].data[...] = seg_points
+        top[1].data[...] = seg_labels
+        top[2].data[...] = cls_labels
         top[3].data[...] = reg_targets
         #print("[debug] train img idx : ", example["metadata"])
 
@@ -206,167 +181,42 @@ class InputKittiData(caffe.Layer):
             worker_init_fn=_worker_init_fn,
             drop_last=not False)
         return dataloader
-    def VoxelFeatureNet(self, voxels, coors, num_points):
-        point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
-        voxel_size = [0.16, 0.16, 4]
-        vx = voxel_size[0]
-        vy = voxel_size[1]
-        x_offset = vx / 2 + point_cloud_range[0]
-        y_offset = vy / 2 + point_cloud_range[1]
-        points_mean = np.sum(voxels[:, :, :3], axis=1, keepdims=True) / num_points.reshape(-1,1,1)
-        f_cluster = voxels[:, :, :3] - points_mean
-
-        f_center = np.zeros_like(voxels[:, :, :2]) # huge debug
-        f_center[:, :, 0] = voxels[:, :, 0] - (np.expand_dims(coors[:, 3].astype(float), axis=1) * vx + x_offset)
-        f_center[:, :, 1] = voxels[:, :, 1] - (np.expand_dims(coors[:, 2].astype(float), axis=1) * vy + y_offset)
-
-        features_ls = [voxels, f_cluster, f_center]
-        features = np.concatenate(features_ls, axis=-1) #[num_voxles, points_num, features]
-
-        points_per_voxels = features.shape[1]
-        mask = get_paddings_indicator_np(num_points, points_per_voxels, axis=0)
-        mask = np.expand_dims(mask, axis=-1)
-        features *= mask
-
-        #(voxel, npoint, channel) -> (channel, voxels, npoints) -> (batch=1, channel=64, voxels, npoints=1)
-        features = np.expand_dims(features, axis=0)
-        features = features.transpose(0,3,1,2)
-        return features
-    def __GroundTruth2FeatMap(self, labels, reg_targets, gt_coords, fp_w, fp_h):
-        gt_coords = gt_coords.squeeze()
-        reg_targets = reg_targets.squeeze()
-        nchannels = reg_targets.shape[-1]
-        canvas = np.zeros(shape=(fp_w , fp_h, nchannels)).astype(int)  #(7, 176, 200) #reg_head = 7
-        # label_canvas = -1*np.ones(shape=(fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        label_canvas = np.zeros(shape=(fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        pc_range = [0,-40,-3,70.4,40,1]
-        # convert from real space coordinate to feature map index
-        w = np.floor((gt_coords[:,0] * fp_w) / 70.4).astype(int)
-        # Add half of the fp_h to convert negative y to positive fp_h
-        y = np.floor((gt_coords[:,1] * fp_h) / 80 + fp_h/2).astype(int)
-        print("reg_targets", reg_targets.shape)
-        print("canvas[:,w,y,:]", canvas[w,y,:].shape)
-        canvas[w,y,:] = reg_targets
-        label_canvas[w,y] = labels
-        return canvas, label_canvas
-    def GroundTruth2FeatMap(self, labels, reg_targets, gt_coords, fp_w, fp_h):
-        num_anchor_per_loc=2
-        gt_coords = gt_coords.squeeze()
-        reg_targets = reg_targets.squeeze()
-        labels = labels.squeeze()
-        nchannels = reg_targets.shape[-1]
-        reg_targets = reg_targets.reshape(num_anchor_per_loc,-1, nchannels)
-        labels = labels.reshape(num_anchor_per_loc, -1)
-        canvas = np.zeros(shape=(num_anchor_per_loc, fp_w , fp_h, nchannels)).astype(int)  #(7, 176, 200) #reg_head = 7
-        # label_canvas = -1*np.ones(shape=(fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        # label_canvas = np.zeros(shape=(num_anchor_per_loc, fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        label_canvas = -1*np.ones(shape=(num_anchor_per_loc, fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        pc_range = [0,-40,-3,70.4,40,1]
-        # convert from real space coordinate to feature map index
-        w = np.floor((gt_coords[:,0] * fp_w) / 70.4).astype(int)
-        # Add half of the fp_h to convert negative y to positive fp_h
-        y = np.floor((gt_coords[:,1] * fp_h) / 80 + fp_h/2).astype(int)
-        # print("reg_targets", reg_targets.shape)
-        # print("canvas[:,w,y,:]", canvas[:,w,y,:].shape)
-        canvas[:,w,y,:] = reg_targets
-        # print("label_canvas[:, w,y]", label_canvas[:,w,y].shape)
-        # print("labels", labels.shape)
-        label_canvas[:,w,y] = labels
-        return canvas, label_canvas
 
 
-class PointPillarsScatter(caffe.Layer):
+
+class SegWeight(caffe.Layer):
     def setup(self, bottom, top):
-        param = eval(self.param_str)
-        output_shape = param['output_shape']
-        self.batch_size = 1
-        self.ny = output_shape[2]
-        self.nx = output_shape[3]
-        self.nchannels = output_shape[4]
+        labels = bottom[0].data
+        seg_weights = self.prepare_loss_weights(labels)
+        top[0].reshape(*seg_weights.shape)
 
-        voxel_features = bottom[0].data
-        voxel_features = np.squeeze(voxel_features) #(1, 64, voxel, 1) -> (64,Voxel)
-        coords = bottom[1].data # reverse_index is True, output coordinates will be zyx format
-        batch_canvas, _ = self.ScatterNet(voxel_features, coords, self.nchannels, self.nx, self.ny)
-        top[0].reshape(*batch_canvas.shape)
     def reshape(self, bottom, top):
         pass
     def forward(self, bottom, top):
-        voxel_features = bottom[0].data #(1,64,-1,1)
-        voxel_features = np.squeeze(voxel_features) #(1, 64, -1, 1) -> (64,-1)
-        coords = bottom[1].data
-        batch_canvas, self.indices = self.ScatterNet(voxel_features, coords, self.nchannels, self.nx, self.ny)
-        top[0].data[...] = batch_canvas
+        labels = bottom[0].data
+        seg_weights = self.prepare_loss_weights(labels)
+        top[0].data[...] = seg_weights
+    def prepare_loss_weights(self,
+                            labels,
+                            pos_cls_weight=1.0, 
+                            neg_cls_weight=1.0,
+                            dtype="float32"):
+     
+        positives = labels > 0
+        negatives = labels == 0
+        negative_cls_weights = negatives.astype(dtype) * neg_cls_weight
+        posetive_cls_weights = positives.astype(dtype) * pos_cls_weight
+        seg_weights = negative_cls_weights + posetive_cls_weights
+        reg_weights = positives.astype(dtype)
+
+        pos_normalizer = np.sum(positives, 1, keepdims=True).astype(dtype)
+        seg_weights /= np.clip(pos_normalizer, a_min=1.0, a_max=None) #(1, 107136)
+
+        return seg_weights
     def backward(self, top, propagate_down, bottom):
-        diff = top[0].diff.reshape(self.batch_size, self.nchannels, self.nx * self.ny)[:,:,self.indices]
-        # bottom[0].diff[...] = np.expand_dims(diff, axis=2) #need match with input features shape
-        bottom[0].diff[...] = np.expand_dims(diff, axis=-1) #need match with input features shape
-    def ScatterNet(self, voxel_features, coords, nchannels, feature_map_x, feature_map_y):
-        batch_canvas = []
-        for batch_itt in range(self.batch_size):
-            canvas = np.zeros(shape=(nchannels, feature_map_x * feature_map_y)) #(nchannels,-1)
-            batch_mask = coords[:, 0] == batch_itt
-            this_coords = coords[batch_mask, :]
-            indices = this_coords[:, 2] * feature_map_x + this_coords[:, 3]
-            indices = indices.astype(int)
-            voxels = voxel_features[:, batch_mask]
-            canvas[:, indices] = voxels
-            batch_canvas.append(canvas)
-
-        if len(batch_canvas)>1:
-            batch_canvas = np.stack(batch_canvas, 0) # stack is too slow!!!
-        else:
-            batch_canvas = batch_canvas[0]
-        batch_canvas = batch_canvas.reshape(self.batch_size, nchannels, feature_map_y, feature_map_x)
-        return batch_canvas, indices
-
-class PointScatter(caffe.Layer):
-    def setup(self, bottom, top):
-        param = eval(self.param_str)
-        output_shape = param['output_shape']
-        self.batch_size = 1
-        self.ny = output_shape[0]
-        self.nx = output_shape[1]
-        self.nchannels = output_shape[2]
-
-        voxel_features = bottom[0].data
-        voxel_features = np.squeeze(voxel_features) #(1, 64, 1, voxel) -> (64,Voxel)
-        coords = bottom[1].data # lattic feature xyz
-        coords = np.squeeze(coords)
-        batch_canvas, _ = self.ScatterNet(voxel_features, coords, self.nchannels, self.nx, self.ny)
-        top[0].reshape(*batch_canvas.shape)
-    def reshape(self, bottom, top):
         pass
-    def forward(self, bottom, top):
-        voxel_features = bottom[0].data #(1,64,-1,1)
-        voxel_features = np.squeeze(voxel_features) #(1, 64, -1, 1) -> (64,-1) #(12000, 64)
-        coords = bottom[1].data #(3, 12000)
-        coords = np.squeeze(coords)
-        #start_time = timeit.default_timer()
-        batch_canvas, self.indices = self.ScatterNet(voxel_features, coords, self.nchannels, self.nx, self.ny)
-        #end_time = timeit.default_timer()
-        #print('PointScatter forwards ran for {}s'.format((end_time-start_time)/60))
-        top[0].data[...] = batch_canvas
-    def backward(self, top, propagate_down, bottom):
-        diff = top[0].diff.reshape(self.batch_size, self.nchannels, self.nx * self.ny)[:,:,self.indices]
-        bottom[0].diff[...] = np.expand_dims(diff, axis=2) #need match with input features shape
-    def ScatterNet(self, voxel_features, coords, nchannels, feature_map_x, feature_map_y):
-        canvas = np.zeros(shape=(nchannels, feature_map_x * feature_map_y)) #(nchannels,-1)
-        indices = coords[1, :] * feature_map_x + coords[0, :] # y*feature_map_x + x
-        indices = indices.astype(int)
-        canvas[:, indices] = voxel_features
-        canvas = canvas.reshape(self.batch_size, nchannels, feature_map_y, feature_map_x)
-        return canvas, indices
 
-    def Voxel3DStack2D(self, voxel_features, coors_3d):
-        # print("coords, ", coors_3d.shape)
-        # print("voxel_features, ", voxel_features.shape)
-        # coords_xy = np.delete(coors_3d, obj=1, axis=1) #delete z column
-        voxel_group = npi.group_by(coors_3d) #features mean
-        # coors_idx, voxel_features = voxel_group.mode(voxel_features) #features max
-        coors_idx, voxel_features = voxel_group.max(voxel_features) #features max
 
-        return voxel_features, coors_idx, voxel_group
 class PrepareLossWeight(caffe.Layer):
     def setup(self, bottom, top):
         labels = bottom[0].data
@@ -556,21 +406,26 @@ class WeightedSmoothL1Loss(caffe.Layer):
 
 class BCLReshape(caffe.Layer):
     def setup(self, bottom, top):
-        in0 = self.reshape_func(bottom[0].data)
-        top[0].reshape(*in0.shape)
+        top_prev = bottom[0].data
+        top_prev, top_lattice = self.reshape_func(top_prev)
+        top[0].reshape(*top_prev.shape)
+        top[1].reshape(*top_lattice.shape)
     def reshape(self, bottom, top):
         pass
     def forward(self, bottom, top):
-        in0 = self.reshape_func(bottom[0].data)
-        top[0].reshape(*in0.shape)
-        top[0].data[...] = in0
+        top_prev = bottom[0].data
+        top_prev, top_lattice = self.reshape_func(top_prev)
+        top[0].reshape(*top_prev.shape) #top_prev
+        top[0].data[...] = top_prev
+        top[1].reshape(*top_lattice.shape) #top_lattice
+        top[1].data[...] = top_lattice
     def backward(self, top, propagate_down, bottom):
         pass
-    def reshape_func(self, in0):
-        _in0 = in0[:,1:][:,::-1].transpose() #coors in reverse order bzyx (V, C) -> (C,V)
-        _in0 = np.expand_dims(_in0,0) #(C,V)-> (1,C,V)
-        _in0 = np.expand_dims(_in0,2) #(1,C,V)-> (1,C,1,V) C=XYZ
-        return _in0
+    def reshape_func(self, top_prev):   
+        top_prev = top_prev.transpose(0,2,1) #(1,N,4) -> (1,4,N)
+        top_prev = np.expand_dims(top_prev,2) #(1,4,N) -> (1,4,,1,N)
+        top_lattice = top_prev[:, :3, ...]
+        return top_prev, top_lattice
 
 class GlobalPooling(caffe.Layer):
     def setup(self, bottom, top):

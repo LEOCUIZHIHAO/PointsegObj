@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 def SimpleVoxel(voxels, num_points):
         points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1))
         return points_mean
+
 def VoxelRandomChoice(voxels, coors, num_points, max_voxels):
     voxel_num = len(voxels)
     if voxel_num < max_voxels:
@@ -44,7 +45,7 @@ def Voxel3DStack2D(voxels, coors, num_points):
     return voxels, _coors, num_points
 
 def PrepSegPoints(points_in_box, points_out_box, sample_size):
-
+    # points_in_box = Car
     tot_points = len(points_out_box) + len(points_in_box)
     if tot_points < sample_size:
         gap = sample_size - tot_points
@@ -81,7 +82,6 @@ def FillRegWithNeg(seg_labels, bbox_targets, anchors_labels, points_sample_size,
         anchors_labels_fill = -1 * np.ones(shape=(gap)) #label -1
         bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
         anchors_labels = np.concatenate((anchors_labels, anchors_labels_fill), axis=0)
-
 
     return bbox_targets, anchors_labels 
 
@@ -207,7 +207,8 @@ def prep_pointcloud(input_dict,
                     sample_importance=1.0,
                     out_dtype=np.float32,
                     keep_voxels=12000,
-                    points_sample_size=12000):
+                    points_sample_size=16000,
+                    num_anchor_per_loc=2):
     """convert point cloud to voxels, create targets if ground truths
     exists.
 
@@ -217,7 +218,7 @@ def prep_pointcloud(input_dict,
     t = time.time()
     class_names = target_assigner.classes
     points = input_dict["lidar"]["points"]
-
+    
     if training:
         anno_dict = input_dict["lidar"]["annotations"]
         gt_dict = {
@@ -377,15 +378,15 @@ def prep_pointcloud(input_dict,
     if shuffle_points:
         # shuffle is a little slow.
         np.random.shuffle(points)
-
+    
     points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
     data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
     
     """
     # check car points
     boxes_lidar = gt_dict["gt_boxes"]
-    bev_map = simplevis.kitti_vis(points_in_box, boxes_lidar)
-    cv2.imwrite('./car_points/car_points{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+    bev_map = simplevis.kitti_vis(data, boxes_lidar)
+    #cv2.imwrite('./car_points/car_points{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
     """
 
     example = {
@@ -512,8 +513,6 @@ def prep_pointcloud(input_dict,
         matched_thresholds = ret["matched_thresholds"]
         unmatched_thresholds = ret["unmatched_thresholds"]
 
-
-
     example["anchors"] = anchors
     anchors_mask = None
     if anchor_area_threshold >= 0:
@@ -582,11 +581,11 @@ def prep_pointcloud(input_dict,
         # cv2.waitKey(0)
         """
         
-        anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], points_sample_size, num_anchor_per_loc=2)
+        #fill box_Target with -1
+        anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], points_sample_size, num_anchor_per_loc)
         targets_dict['bbox_targets'] = anchors_bbox
         targets_dict['labels'] = anchors_labels
 
-        pos_idx = targets_dict['labels']==1 #positive
         example.update({
             'labels': targets_dict['labels'], # if anchors free the 0 is the horizontal/vertical anchors
             'reg_targets': targets_dict['bbox_targets'], # target assign get offsite
