@@ -452,7 +452,7 @@ class SolverWrapperTest:
         self._nms_iou_thresholds=[0.5] ## NOTE: double check #pillar use 0.5, second use 0.01
         self._post_center_range=list(model_cfg.post_center_limit_range) ## NOTE: double check
         self._use_direction_classifier=False ## NOTE: double check
-        cls_thresh = 0.6
+        cls_thresh = 0.05
         detections = []
         t = time.time()
 
@@ -467,7 +467,7 @@ class SolverWrapperTest:
             cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
             box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...].reshape(1,16000,-1)
             # Select car prediction and classification
-
+            print(seg_cls_pred)
             car_points = seg_points[:, (seg_cls_pred > cls_thresh)].squeeze()
             cls_preds = cls_preds[:,(seg_cls_pred > cls_thresh)]
             box_preds = box_preds[:,(seg_cls_pred > cls_thresh)]
@@ -515,7 +515,7 @@ class SolverWrapperTest:
             meta_list = [None] * batch_size
         else:
             meta_list = example["metadata"]
-
+        print(example["anchors"].shape)
         batch_anchors = example["anchors"].view(batch_size, -1, example["anchors"].shape[-1])
         if "anchors_mask" not in example:
             batch_anchors_mask = [None] * batch_size
@@ -776,51 +776,28 @@ class SolverWrapperTest:
             predictions_dicts.append(predictions_dict)
 
         return predictions_dicts
-    def SimpleVoxel(self, voxels, coors, num_points):
-        points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1))
-        return points_mean
-    def VoxelFeatureNet(self, voxels, coors, num_points):
-        # for VoxelFeatureNet
-        point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
-        voxel_size = [0.16, 0.16, 4]
-        vx = voxel_size[0]
-        vy = voxel_size[1]
-        x_offset = vx / 2 + point_cloud_range[0]
-        y_offset = vy / 2 + point_cloud_range[1]
+    def seg_predict(self,pred, gt):
+        pred, gt = np.array(pred), np.array(gt)
+        scores = dict()
+        labels = np.unique(gt)
+        assert np.all([(v in labels) for v in np.unique(pred)])
 
-        points_mean = np.sum(voxels[:, :, :3], axis=1, keepdims=True) / num_points.reshape(-1,1,1)
-        f_cluster = voxels[:, :, :3] - points_mean
+        TPs, FPs, FNs, Total = [], [], [], []
+        for l in labels:
+            TPs.append(sum((gt == l) * (pred == l)))
+            FPs.append(sum((gt != l) * (pred == l)))
+            FNs.append(sum((gt == l) * (pred != l)))
+            Total.append(sum(gt == l))
 
-        f_center = np.zeros_like(voxels[:, :, :2]) #huge bug here if not zero like it will directly change the value
-        f_center[:, :, 0] = voxels[:, :, 0] - (np.expand_dims(coors[:, 3].astype(float), axis=1) * vx + x_offset)
-        f_center[:, :, 1] = voxels[:, :, 1] - (np.expand_dims(coors[:, 2].astype(float), axis=1) * vy + y_offset)
+        scores['accuracy'] = sum(gt == pred) / len(gt)
+        scores['confusion'] = confusion_matrix(gt, pred)
+        scores['class_accuracy'] = [TPs[i] / (TPs[i] + FNs[i]) for i in range(len(labels))]
+        scores['avg_class_accuracy'] = sum(scores['class_accuracy']) / len(labels)
+        scores['class_iou'] = [TPs[i] / (TPs[i] + FNs[i] + FPs[i]) for i in range(len(labels))]
+        scores['avg_class_iou'] = sum(scores['class_iou']) / len(labels)
+        scores['num_points'] = Total
 
-        features_ls = [voxels, f_cluster, f_center]
-        features = np.concatenate(features_ls, axis=-1) #[num_voxles, points_num, features]
-
-        points_per_voxels = features.shape[1]
-        mask = get_paddings_indicator_np(num_points, points_per_voxels, axis=0)
-        mask = np.expand_dims(mask, axis=-1)
-        features *= mask
-        #(voxel, npoint, channel) -> (channel, voxels, npoints)
-        features = np.expand_dims(features, axis=0)
-        features = features.transpose(0,3,1,2)
-        return features
-    def GroundTruth2FeatMap(self, labels, reg_targets, gt_coords, fp_w, fp_h):
-        gt_coords = gt_coords.squeeze()
-        reg_targets = reg_targets.squeeze()
-        nchannels = reg_targets.shape[-1]
-        canvas = np.zeros(shape=(fp_w , fp_h, nchannels)).astype(int)  #(7, 176, 200) #reg_head = 7
-        label_canvas = -1*np.ones(shape=(fp_w, fp_h)).astype(int)  #(7, 176, 200) #reg_head = 7
-        pc_range = [0,-40,-3,70.4,40,1]
-        # convert from real space coordinate to feature map index
-        w = np.floor((gt_coords[:,0] * fp_w) / 70.4).astype(int)
-        # Add half of the fp_h to convert negative y to positive fp_h
-        y = np.floor((gt_coords[:,1] * fp_h) / 80 + fp_h/2).astype(int)
-        canvas[w,y,:] = reg_targets
-        label_canvas[w,y] = labels
-        return canvas, label_canvas
-
+        return scores
     """Load weight fromm caffe model"""
     def caffe_load_weight(self):
         exp_dir = "./exp/leo_debug/"

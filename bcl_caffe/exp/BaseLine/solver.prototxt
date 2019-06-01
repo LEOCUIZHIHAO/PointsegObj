@@ -1,0 +1,6 @@
+train_net: "./exp/BaseLine/train.prototxt"
+test_net: "./exp/BaseLine/eval.prototxt"
+test_iter: 3769
+test_interval: 999999999
+test_initialization: false
+iter_size: 1

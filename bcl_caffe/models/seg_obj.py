@@ -98,7 +98,7 @@ def segmentation(n, seg_points, label, phase):
     ############### Params ###############
 
     top_prev, top_lattice= L.Python(seg_points, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshape'))
-    
+
     top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 64],
                           lattic_scale=["0*16_1*16_2*16","0*8_1*8_2*8","0*4_1*4_2*4","0*2_1*2_2*2"], loop=4, skip='concat')
 
@@ -119,16 +119,16 @@ def segmentation(n, seg_points, label, phase):
 
         seg_preds = L.Permute(n.seg_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=1,H,W) -> (B,H,W,C=1)
         seg_preds = L.Reshape(seg_preds, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=1)-> (B, -1, 1)
-        
+
         seg_weights = L.Python(label, name = "SegWeight",
                                python_param=dict(
                                                 module='bcl_layers',
                                                 layer='SegWeight'
                                                 ))
-        
-        seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1, 1])))
 
-        n.loss= L.Python(seg_preds, label, seg_weights,
+        seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1])))
+
+        n.seg_loss= L.Python(seg_preds, label, seg_weights,
                          name = "FocalLoss",
                          loss_weight = 1,
                          python_param=dict(
@@ -136,10 +136,10 @@ def segmentation(n, seg_points, label, phase):
                          layer='WeightFocalLoss'
                          ),
                 param_str=str(dict(focusing_parameter=2, alpha=0.25)))
-        
-        #n.loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
+
+        #n.seg_loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
         n.accuracy = L.Accuracy(n.seg_preds, label)
-        output = n.loss
+        output = n.seg_loss
     # Problem
     elif phase == "eval":
         n.output = L.Sigmoid(n.seg_preds)
@@ -154,18 +154,13 @@ def object_detection(n, car_points, label, reg_targets, phase):
     layer_nums = [1]
     upsample_strides = [1]
     num_upsample_filters = [64]
-    anchors_fp_w = 1408 #1408 176
-    anchors_fp_h = 1600 #1600 200
-    keep_voxels =12000
-    f_map_h = 1 #int(anchors_fp_h/2)
-    f_map_w = keep_voxels #int(anchors_fp_w/2)
     box_code_size = 7
     num_anchor_per_loc = 2
     num_cls = 1
     ############### Params ###############
 
     top_prev, top_lattice= L.Python(car_points, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshape'))
-    
+
     top_prev = bcl_bn_relu(n, 'bcl_obj', top_prev, top_lattice, nout=[64, 128, 128, 64],
                           lattic_scale=["0*4_1*4_2*4","0*2_1*2_2*2", "0_1_2","0/2_1/2_2/2"], loop=4)
 
@@ -192,14 +187,6 @@ def object_detection(n, car_points, label, reg_targets, phase):
                           param=[dict(lr_mult=1), dict(lr_mult=1)])
     cls_preds = n.cls_preds
     box_preds = n.box_preds
-    # Jim comment
-    # NOTE: This works for second
-    # cls_preds_reshape = L.Reshape(cls_preds, reshape_param=dict(shape=dict(dim=[-1, num_anchor_per_loc, num_cls, f_map_h, f_map_w]))) #(B,C,H,W) -> (B,n_anchor,n_cls,H,W)
-    # cls_preds_permute = L.Permute(cls_preds_reshape, permute_param=dict(order=[0, 1, 3, 4, 2])) #(B,n_anchor,n_cls,H,W) -> (B,n_anchor,H,W,n_cls)
-    # cls_preds_reshape = L.Reshape(cls_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,n_anchor,H,W,n_cls) -> (B, -1, n_cls)
-    # box_preds_reshape = L.Reshape(box_preds, reshape_param=dict(shape=dict(dim=[-1, num_anchor_per_loc, box_code_size, f_map_h, f_map_w]))) #(B,C,H,W) -> (B,n_anchor,box_c_siz,H,W)
-    # box_preds_permute = L.Permute(box_preds_reshape, permute_param=dict(order=[0, 1, 3, 4, 2])) #(B,n_anchor,box_c_siz,H,W) -> (B,n_anchor,H,W,box_c_siz)
-    # box_preds_reshape = L.Reshape(box_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, box_code_size])))# (B,n_anchor,H,W,box_c_siz) -> (B, -1, box_c_siz)
 
     cls_preds_permute = L.Permute(cls_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=2,H,W) -> (B,H,W,C=2)
     cls_preds_reshape = L.Reshape(cls_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=2)-> (B, -1, 1)
@@ -258,48 +245,6 @@ def seg_object_detection(phase,
             save_path=None,
             ):
 
-    """
-    #RPN pillar config
-    num_filters = [64,128,256]
-    layer_strides = [2,2,2]
-    layer_nums = [3,5,5]
-    upsample_strides = [1, 2, 4]
-    num_upsample_filters = [128, 128, 128]
-    anchors_fp_w = 432 #1408
-    anchors_fp_h = 496 #1600
-    f_map_h = int(anchors_fp_h/2)
-    f_map_w = int(anchors_fp_w/2)
-    """
-
-    # #RPN second config
-    # num_filters = [128]
-    # layer_strides = [1]
-    # layer_nums = [5]
-    # upsample_strides = [1]
-    # num_upsample_filters = [128]
-    # anchors_fp_w = 1408 #1408 176
-    # anchors_fp_h = 1600 #1600 200
-    # keep_voxels =12000
-    # f_map_h = 1 #int(anchors_fp_h/2)
-    # f_map_w = keep_voxels #int(anchors_fp_w/2)
-
-
-    #RPN second config
-    num_filters = [64]
-    layer_strides = [2]
-    layer_nums = [1]
-    upsample_strides = [1]
-    num_upsample_filters = [64]
-    anchors_fp_w = 1408 #1408 176
-    anchors_fp_h = 1600 #1600 200
-    keep_voxels =12000
-    f_map_h = 1 #int(anchors_fp_h/2)
-    f_map_w = keep_voxels #int(anchors_fp_w/2)
-
-    box_code_size = 7
-    num_anchor_per_loc = 2
-    num_cls = 1
-
     n = caffe.NetSpec()
 
     if phase == "train":
@@ -334,5 +279,6 @@ def seg_object_detection(phase,
         car_points = output
 
     n = object_detection(n, seg_points, cls_labels, reg_targets, phase)
+    
     print(n)
     return n.to_proto()

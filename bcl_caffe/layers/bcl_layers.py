@@ -69,8 +69,6 @@ class DataFeature(caffe.Layer):
     def setup(self, bottom, top):
         # BCL
         top[0].reshape(*(1, 16000, 4)) # for pillar shape should (B,C=9,V,N=100), For second (B,C=1,V,N=5)
-        # Pillar
-        # top[0].reshape(*(1, 9, 2000, 100)) # for pillar shape should (B,C=9,V,N=100), For second (B,C=1,V,N=5)
     def reshape(self, bottom, top):
         pass
     def forward(self, bottom, top):
@@ -82,8 +80,6 @@ class LatticeFeature(caffe.Layer):
     def setup(self, bottom, top):
         # BCL
         top[0].reshape(*(16000,4)) #(V, C=4) # TODO:
-        # Pillar
-        # top[0].reshape(*(2000,4)) #(V, C=4) # TODO:
     def reshape(self, bottom, top):
         pass
     def forward(self, bottom, top):
@@ -98,14 +94,7 @@ class InputKittiData(caffe.Layer):
 
         model_dir = params['model_dir']
         config_path = params['config_path']
-        anchors_fp_w = 1408 #1408 176
-        anchors_fp_h = 1600
-        fp_factor = 8
-        self.fp_w = int(anchors_fp_w/fp_factor) #1408 176
-        self.fp_h = int(anchors_fp_h/fp_factor) #1600 200
-
         self.phase = params['subset']
-        self.keep_voxels = 12000
         self.generate_anchors_cachae = params['anchors_cachae'] #True FOR Pillar, False For BCL
         self.input_cfg, self.eval_input_cfg, self.model_cfg, train_cfg = load_config(model_dir, config_path)
         self.voxel_generator, self.target_assigner = build_network(self.model_cfg)
@@ -121,7 +110,6 @@ class InputKittiData(caffe.Layer):
         self.data_iter = iter(self.dataloader)
 
         # for point object segmentation
-
         top[0].reshape(*seg_points.shape)
         top[1].reshape(*seg_labels.shape) #[1 107136]
         top[2].reshape(*cls_labels.shape) #[]
@@ -182,8 +170,6 @@ class InputKittiData(caffe.Layer):
             drop_last=not False)
         return dataloader
 
-
-
 class SegWeight(caffe.Layer):
     def setup(self, bottom, top):
         labels = bottom[0].data
@@ -215,7 +201,6 @@ class SegWeight(caffe.Layer):
         return seg_weights
     def backward(self, top, propagate_down, bottom):
         pass
-
 
 class PrepareLossWeight(caffe.Layer):
     def setup(self, bottom, top):
@@ -328,7 +313,6 @@ class WeightFocalLoss(caffe.Layer):
         self.cls_weights = bottom[2].data
         self.cls_weights = np.expand_dims(self.cls_weights,-1)
 
-
         self._p_t =  1 / (1 + np.exp(-self._p)) # Compute sigmoid activations
 
         self.first = (1-self.label) * (1-self.alpha) + self.label * self.alpha
@@ -381,7 +365,7 @@ class WeightedSmoothL1Loss(caffe.Layer):
             self.diff[...,-1] = np.sin(self.diff[...,-1]) #use sin_difference
 
         self.abs_diff = np.abs(self.diff)
-        # NOTE: 26th may: change from less than to less or equal
+        #change from less than to less or equal
         self.cond = self.abs_diff <= (1/(self.sigma**2))
         loss = np.where(self.cond, 0.5 * self.sigma**2 * self.abs_diff**2,
                                     self.abs_diff - 0.5/self.sigma**2)
@@ -396,7 +380,7 @@ class WeightedSmoothL1Loss(caffe.Layer):
             delta = np.where(self.cond[...,:-1], (self.sigma**2) * self.diff[...,:-1], np.sign(self.diff[...,:-1]))
 
             delta_rotation = np.where(self.cond[...,-1:], (self.sigma**2) * self.sin_diff * self.cos_diff,
-                                        np.sign(self.sin_diff) * self.cos_diff) #if sign(0) is gonna be 0!!!!!!!!!!!!!!
+                                        np.sign(self.sin_diff) * self.cos_diff) #if sign(0) is gonna be 0!
 
             delta = np.concatenate([delta, delta_rotation], axis=-1)
 
