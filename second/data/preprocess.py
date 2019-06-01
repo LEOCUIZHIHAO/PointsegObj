@@ -44,7 +44,14 @@ def Voxel3DStack2D(voxels, coors, num_points):
     _, num_points = npi.group_by(coords_xy).sum(num_points)
     return voxels, _coors, num_points
 
-def PrepSegPoints(points_in_box, points_out_box, sample_size):
+def PrepSegPoints(points_in_box, points_out_box, sample_size=None):
+
+    # if sample_size==None:
+    #     points_in_label = np.ones(shape=(len(points_in_box),1), dtype=int)
+    #     points_out_label = np.zeros(shape=(len(points_out_box),1), dtype=int)
+    #     data = np.concatenate((points_in_box,points_out_box),axis=0)
+    #     label = np.concatenate((points_in_label,points_out_label),axis=0)
+    #     return data, label
     # points_in_box = Car
     tot_points = len(points_out_box) + len(points_in_box)
     if tot_points < sample_size:
@@ -83,7 +90,7 @@ def FillRegWithNeg(seg_labels, bbox_targets, anchors_labels, points_sample_size,
         bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
         anchors_labels = np.concatenate((anchors_labels, anchors_labels_fill), axis=0)
 
-    return bbox_targets, anchors_labels 
+    return bbox_targets, anchors_labels
 
 def Voxel3DStack2DWithZcoord(voxels, coors, num_points):
     voxels = np.concatenate((voxels,coors[:,1:2]), axis=1) #xyzr+Zcoord
@@ -208,7 +215,8 @@ def prep_pointcloud(input_dict,
                     out_dtype=np.float32,
                     keep_voxels=12000,
                     points_sample_size=16000,
-                    num_anchor_per_loc=2):
+                    num_anchor_per_loc=2,
+                    seg_eval=False):
     """convert point cloud to voxels, create targets if ground truths
     exists.
 
@@ -218,8 +226,8 @@ def prep_pointcloud(input_dict,
     t = time.time()
     class_names = target_assigner.classes
     points = input_dict["lidar"]["points"]
-    
-    if training:
+
+    if training or seg_eval:
         anno_dict = input_dict["lidar"]["annotations"]
         gt_dict = {
             "gt_boxes": anno_dict["boxes"],
@@ -236,6 +244,7 @@ def prep_pointcloud(input_dict,
         if use_group_id and "group_ids" in anno_dict:
             group_ids = anno_dict["group_ids"]
             gt_dict["group_ids"] = group_ids
+
     calib = None
     if "calib" in input_dict:
         calib = input_dict["calib"]
@@ -263,7 +272,7 @@ def prep_pointcloud(input_dict,
         points = points[masks.any(-1)]
     metrics = {}
 
-    if training:
+    if training or seg_eval:
 
         boxes_lidar = gt_dict["gt_boxes"]
         """
@@ -335,15 +344,16 @@ def prep_pointcloud(input_dict,
         if "group_ids" in gt_dict:
             group_ids = gt_dict["group_ids"]
 
-        prep.noise_per_object_v3_(
-            gt_dict["gt_boxes"],
-            points,
-            gt_boxes_mask,
-            rotation_perturb=gt_rotation_noise,
-            center_noise_std=gt_loc_noise_std,
-            global_random_rot_range=global_random_rot_range,
-            group_ids=group_ids,
-            num_try=100)
+        if training:
+            prep.noise_per_object_v3_(
+                gt_dict["gt_boxes"],
+                points,
+                gt_boxes_mask,
+                rotation_perturb=gt_rotation_noise,
+                center_noise_std=gt_loc_noise_std,
+                global_random_rot_range=global_random_rot_range,
+                group_ids=group_ids,
+                num_try=100)
 
         # should remove unrelated objects after noise per object
         # for k, v in gt_dict.items():
@@ -368,6 +378,16 @@ def prep_pointcloud(input_dict,
         gt_dict["gt_boxes"][:, 6] = box_np_ops.limit_period(
             gt_dict["gt_boxes"][:, 6], offset=0.5, period=2 * np.pi)
 
+        if seg_eval:
+            points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
+            data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
+
+            example = {
+            'seg_points': data,
+            'seg_labels': label,
+            }
+            return example
+
         """
         # save bv ground truth cars
         boxes_lidar = gt_dict["gt_boxes"]
@@ -388,18 +408,21 @@ def prep_pointcloud(input_dict,
         'seg_labels': label,
         }
 
-
     if not training:
         if len(points) > points_sample_size:
             num_points = len(points)
             num_points = np.random.choice(num_points, size=points_sample_size, replace=False) #not repeat sampling
             points = points[num_points]
-            example = {'seg_points': points}
+            example = {
+            'seg_points': points
+            }
         else:
             num_points = len(points)
             num_points = np.random.choice(num_points, size=points_sample_size, replace=True) #repeat sampling
             points = points[num_points]
-            example = {'seg_points': points}
+            example = {
+            'seg_points': points
+            }
 
     """
     # check car points
@@ -455,7 +478,7 @@ def prep_pointcloud(input_dict,
         unmatched_thresholds = anchor_cache["unmatched_thresholds"]
 
     else:
-        
+
         # generate anchors from ground truth
         """
         voxels= SimpleVoxel(voxels, num_points) #(V,100,C) -> (B, C, V, N)
@@ -492,7 +515,7 @@ def prep_pointcloud(input_dict,
         #anchors = ret["anchors"]
         """
 
-       
+
         # generate anchors from  voxel + anchor free
         """
         gt_boxes_coords = gt_dict["gt_boxes"][:,:3] #original gt xyz
@@ -600,7 +623,7 @@ def prep_pointcloud(input_dict,
         # cv2.imshow('heights', pp_map)
         # cv2.waitKey(0)
         """
-        
+
         #fill box_Target with -1
         anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], points_sample_size, num_anchor_per_loc)
         targets_dict['bbox_targets'] = anchors_bbox

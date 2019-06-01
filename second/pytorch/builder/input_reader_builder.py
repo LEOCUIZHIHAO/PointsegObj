@@ -52,7 +52,8 @@ def build(input_reader_config,
           voxel_generator,
           target_assigner=None,
           multi_gpu=False,
-          generate_anchors_cachae=False) -> DatasetWrapper:
+          generate_anchors_cachae=False,
+          segmentation_eval=False) -> DatasetWrapper:
     """Builds a tensor dictionary based on the InputReader config.
 
     Args:
@@ -75,6 +76,7 @@ def build(input_reader_config,
         voxel_generator,
         target_assigner,
         multi_gpu=multi_gpu,
-        generate_anchors_cachae=generate_anchors_cachae) #f use cachae save memory but not suit for BCL
+        generate_anchors_cachae=generate_anchors_cachae,
+        segmentation_eval=segmentation_eval) #f use cachae save memory but not suit for BCL
     dataset = DatasetWrapper(dataset)
     return dataset

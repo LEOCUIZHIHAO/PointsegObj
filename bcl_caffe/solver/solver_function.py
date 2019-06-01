@@ -342,7 +342,8 @@ def load_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner,
         training=False,
         voxel_generator=voxel_generator,
         target_assigner=target_assigner,
-        generate_anchors_cachae=generate_anchors_cachae) #True FOR Pillar, False For BCL
+        generate_anchors_cachae=generate_anchors_cachae,
+        segmentation_eval=False) #True FOR Pillar, False For BCL
 
     eval_dataloader = torch.utils.data.DataLoader(
         eval_dataset,
@@ -353,6 +354,26 @@ def load_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner,
         collate_fn=merge_second_batch)
 
     return eval_dataloader, eval_dataset
+
+def segmentation_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner,generate_anchors_cachae, segmentation_eval):
+    seg_eval_dataset = input_reader_builder.build(
+        eval_input_cfg,
+        model_cfg,
+        training=False,
+        voxel_generator=voxel_generator,
+        target_assigner=target_assigner,
+        generate_anchors_cachae=generate_anchors_cachae,
+        segmentation_eval=segmentation_eval)
+
+    seg_eval_dataloader = torch.utils.data.DataLoader(
+        seg_eval_dataset,
+        batch_size=eval_input_cfg.batch_size, # only support multi-gpu train
+        shuffle=False,
+        num_workers=eval_input_cfg.preprocess.num_workers,
+        pin_memory=False,
+        collate_fn=merge_second_batch)
+
+    return seg_eval_dataloader
 
 def example_convert_to_torch(example, dtype=torch.float32,
                              device=None) -> dict:
@@ -425,7 +446,9 @@ class SolverWrapperTest:
         caffe.set_device(0)
         # self.load_pretrained_weight() #mannully load weights''='
         # self.caffe_load_weight()
+        # self.segmentation_eval_on_val()
         self.eval_on_val()
+
     def eval_on_val(self):
         self.solver.test_nets[0].share_with(self.solver.net)
         _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
@@ -467,7 +490,7 @@ class SolverWrapperTest:
             cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
             box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...].reshape(1,16000,-1)
             # Select car prediction and classification
-            print(seg_cls_pred)
+
             car_points = seg_points[:, (seg_cls_pred > cls_thresh)].squeeze()
             cls_preds = cls_preds[:,(seg_cls_pred > cls_thresh)]
             box_preds = box_preds[:,(seg_cls_pred > cls_thresh)]
@@ -497,6 +520,31 @@ class SolverWrapperTest:
             model_logging.log_text("Evaluation {}".format(k), global_step)
             model_logging.log_text(v, global_step)
         model_logging.log_metrics(result_dict["detail"], global_step)
+
+    def segmentation_eval_on_val(self):
+        self.solver.test_nets[0].share_with(self.solver.net)
+        _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
+        voxel_generator, self.target_assigner = build_network(model_cfg)
+        dataloader = segmentation_dataloader(eval_input_cfg, model_cfg, voxel_generator, self.target_assigner, generate_anchors_cachae=False, segmentation_eval=True)
+        data_iter=iter(dataloader)
+
+        cls_thresh = 0.05
+        detections = []
+        for i in tqdm(range(len(data_iter))):
+            example = next(data_iter)
+            seg_points = example['seg_points']
+            seg_labels = example['seg_labels']
+            self.solver.test_nets[0].blobs['top_prev'].reshape(*seg_points.shape)
+            self.solver.test_nets[0].blobs['top_prev'].data[...] = seg_points
+            self.solver.test_nets[0].forward()
+            #seg_cls_pred output shape (1,1,1,16000)
+            seg_cls_pred = self.solver.test_nets[0].blobs["output"].data[...].squeeze()
+            cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
+            box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...].reshape(1,16000,-1)
+            # Select car prediction and classification
+            #seg predictions
+            self.seg_predict(seg_cls_pred, seg_labels)
+
     def predict(self, example, preds_dict):
         """start with v1.6.0, this function don't contain any kitti-specific code.
         Returns:
@@ -515,7 +563,7 @@ class SolverWrapperTest:
             meta_list = [None] * batch_size
         else:
             meta_list = example["metadata"]
-        print(example["anchors"].shape)
+
         batch_anchors = example["anchors"].view(batch_size, -1, example["anchors"].shape[-1])
         if "anchors_mask" not in example:
             batch_anchors_mask = [None] * batch_size
@@ -776,6 +824,7 @@ class SolverWrapperTest:
             predictions_dicts.append(predictions_dict)
 
         return predictions_dicts
+
     def seg_predict(self,pred, gt):
         pred, gt = np.array(pred), np.array(gt)
         scores = dict()
@@ -798,6 +847,7 @@ class SolverWrapperTest:
         scores['num_points'] = Total
 
         return scores
+
     """Load weight fromm caffe model"""
     def caffe_load_weight(self):
         exp_dir = "./exp/leo_debug/"

@@ -37,7 +37,8 @@ def build(input_reader_config,
           voxel_generator,
           target_assigner,
           multi_gpu=False,
-          generate_anchors_cachae=False):
+          generate_anchors_cachae=False,
+          segmentation_eval=False):
     """Builds a tensor dictionary based on the InputReader config.
 
     Args:
@@ -132,8 +133,7 @@ def build(input_reader_config,
             "anchors_dict": anchors_dict,
         }
 
-
-    prep_func = partial(prep_func, anchor_cache=anchor_cache)
+    prep_func = partial(prep_func, anchor_cache=anchor_cache, seg_eval=segmentation_eval)
     dataset = dataset_cls(
         info_path=dataset_cfg.kitti_info_path,
         root_path=dataset_cfg.kitti_root_path,
