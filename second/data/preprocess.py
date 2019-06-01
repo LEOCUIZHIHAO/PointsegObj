@@ -43,11 +43,26 @@ def Voxel3DStack2D(voxels, coors, num_points):
     _, num_points = npi.group_by(coords_xy).sum(num_points)
     return voxels, _coors, num_points
 
-# def Voxel3DStack2D(voxels, coors, num_points):
-#     coords_xy = np.delete(coors, obj=0, axis=1) #yx #delete or seletced
-#     _coors = npi.group_by(coords_xy)#_coors = yx)
-#     new_voxels = _coors.split(voxels)
-#     return voxels, _coors
+def PrepSegPoints(points_in_box, points_out_box, sample_size):
+
+    tot_points = len(points_out_box) + len(points_in_box)
+    if tot_points < sample_size:
+        gap = sample_size - tot_points
+        choice = np.random.randint(0, len(points_out_box), gap)
+        _gap = points_out_box[choice,:]
+        points_out_box = np.concatenate((points_out_box, _gap),axis=0)
+
+    else:
+        out_sample = sample_size - len(points_in_box)
+        points_out_box = points_out_box[:out_sample]#downsample
+
+    points_in_label = np.ones(shape=(len(points_in_box),1), dtype=int)
+    points_out_label = np.zeros(shape=(len(points_out_box),1), dtype=int)
+
+    data = np.concatenate((points_in_box,points_out_box),axis=0)
+    label = np.concatenate((points_in_label,points_out_label),axis=0)
+
+    return data, label
 
 def Voxel3DStack2DWithZcoord(voxels, coors, num_points):
     voxels = np.concatenate((voxels,coors[:,1:2]), axis=1) #xyzr+Zcoord
@@ -170,7 +185,8 @@ def prep_pointcloud(input_dict,
                     random_flip_y=True,
                     sample_importance=1.0,
                     out_dtype=np.float32,
-                    keep_voxels=12000):
+                    keep_voxels=12000,
+                    points_sample_size=12000):
     """convert point cloud to voxels, create targets if ground truths
     exists.
 
@@ -329,15 +345,32 @@ def prep_pointcloud(input_dict,
         # limit rad to [-pi, pi]
         gt_dict["gt_boxes"][:, 6] = box_np_ops.limit_period(
             gt_dict["gt_boxes"][:, 6], offset=0.5, period=2 * np.pi)
+
         """
         # save bv ground truth cars
         boxes_lidar = gt_dict["gt_boxes"]
         bev_map = simplevis.kitti_vis(points, boxes_lidar)
         #cv2.imwrite('./bev_car_prep/bev_map{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
         """
+
     if shuffle_points:
         # shuffle is a little slow.
         np.random.shuffle(points)
+
+    points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
+    data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
+    
+    """
+    # check car points
+    boxes_lidar = gt_dict["gt_boxes"]
+    bev_map = simplevis.kitti_vis(points_in_box, boxes_lidar)
+    cv2.imwrite('./car_points/car_points{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+    """
+
+    example = {
+        'seg_points': data,
+        'seg_labels': label,
+    }
 
     # [0, -40, -3, 70.4, 40, 1]
     voxel_size = voxel_generator.voxel_size
@@ -345,6 +378,9 @@ def prep_pointcloud(input_dict,
     grid_size = voxel_generator.grid_size
     # [352, 400]
     t1 = time.time()
+
+    #voxel_generator
+    """
     if not multi_gpu:
         res = voxel_generator.generate(
             points, max_voxels)
@@ -368,6 +404,8 @@ def prep_pointcloud(input_dict,
         "num_voxels": num_voxels,
         "metrics": metrics,
     }
+    """
+
 
     if calib is not None:
         example["calib"] = calib
@@ -382,6 +420,9 @@ def prep_pointcloud(input_dict,
         unmatched_thresholds = anchor_cache["unmatched_thresholds"]
 
     else:
+        
+        # generate anchors from ground truth
+        """
         voxels= SimpleVoxel(voxels, num_points) #(V,100,C) -> (B, C, V, N)
         voxels, coordinates, num_points = VoxelRandomChoice(voxels, coordinates, num_points, keep_voxels)
         example['voxels']=voxels
@@ -404,14 +445,18 @@ def prep_pointcloud(input_dict,
             ret = target_assigner.generate_anchors(feature_map_size)
             anchors_dict = target_assigner.generate_anchors_dict(feature_map_size)
             anchors = ret["anchors"]
+        """
 
-        # for anchor proposals
-        #ret = target_assigner.generate_anchors_from_voxels(coordinates) #for coordinates generate anchors
-        #anchors_dict = target_assigner.generate_anchors_dict_from_voxels(coordinates) #this is the key to control the number of anchors (input anchors) ['anchors, unmatch,match']
+
+        # generate anchors from anchor free
+        """
+        ret = target_assigner.generate_anchors_from_voxels(coordinates) #for coordinates generate anchors
+        anchors_dict = target_assigner.generate_anchors_dict_from_voxels(coordinates) #this is the key to control the number of anchors (input anchors)
         #anchors = ret["anchors"]
+        """
 
-
-        # for anchor voxel + anchor free
+       
+        # generate anchors from  voxel + anchor free
         """
         gt_boxes_coords = gt_dict["gt_boxes"][:,:3] #original gt xyz
         #gt_boxes_coords = np.round(gt_dict["gt_boxes"][:,:3]).astype(int) #round xyz
@@ -433,10 +478,21 @@ def prep_pointcloud(input_dict,
                 anchors_dict[order_k][k] = np.concatenate((anchors_dict[order_k][k], anchors_dict_gt[order_k][k]))
         """
 
+        # generate anchors from car points
+        points_in_box = points_in_box[:,:3] #xyz
+        points_in_box = points_in_box[:,::-1] #zyx
+        ret = target_assigner.generate_anchors_from_gt(points_in_box) #for GT generate anchors
+        anchors = ret["anchors"]
+        anchors_dict = target_assigner.generate_anchors_dict_from_gt(points_in_box) #for GT generate anchors
+
+
         anchors_bv = box_np_ops.rbbox2d_to_near_bbox(
             anchors[:, [0, 1, 3, 4, 6]])
         matched_thresholds = ret["matched_thresholds"]
         unmatched_thresholds = ret["unmatched_thresholds"]
+
+
+
     example["anchors"] = anchors
     anchors_mask = None
     if anchor_area_threshold >= 0:
@@ -471,7 +527,7 @@ def prep_pointcloud(input_dict,
             unmatched_thresholds=unmatched_thresholds,
             importance=gt_dict["gt_importance"])
 
-        """
+        
         # bev anchors with points
         boxes_lidar = gt_dict["gt_boxes"]
         bev_map = simplevis.kitti_vis(points, boxes_lidar, gt_dict["gt_names"])
@@ -479,10 +535,10 @@ def prep_pointcloud(input_dict,
         ignored_anchors = anchors[targets_dict['labels'] == -1]
         bev_map = simplevis.draw_box_in_bev(bev_map, [0, -30, -3, 64, 30, 1], ignored_anchors, [128, 128, 128], 2) #ignored_anchors gray    #[0, -30, -3, 64, 30, 1] for kitti
         bev_map = simplevis.draw_box_in_bev(bev_map, [0, -30, -3, 64, 30, 1], assigned_anchors, [255, 0, 0]) #assigned_anchors blue
-        cv2.imwrite('gt_bev_anchors/v_anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+        cv2.imwrite('car_points_anchors/anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
         # cv2.imshow('anchors', bev_map)
         # cv2.waitKey(0)
-        """
+        
 
         """
         # bev boxes_lidar with voxels (put z in to the plane)
@@ -511,8 +567,6 @@ def prep_pointcloud(input_dict,
             'reg_targets': targets_dict['bbox_targets'], # target assign get offsite
             # 'reg_weights': targets_dict['bbox_outside_weights'],
             'importance': targets_dict['importance'],
-            'pos_reg_targets' : targets_dict['bbox_targets'][pos_idx],
-            'pos_labels' : targets_dict['labels'][pos_idx],
         })
 
     return example

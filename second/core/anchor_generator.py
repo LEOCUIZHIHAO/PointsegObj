@@ -129,7 +129,7 @@ class AnchorGeneratorRange(AnchorGenerator):
 
     def generate_from_groundtruth(self, coords):
         return box_np_ops.groundtruth_anchors_3d_generator(
-            coords, self._sizes, self._rotations, self._dtype)
+            coords, self._sizes, self._anchor_shift, self._rotations, self._dtype)
 
     @property
     def ndim(self):

@@ -696,6 +696,7 @@ def voxels_anchors_3d_generator( coords,
 
 def groundtruth_anchors_3d_generator( coords,
                                  sizes=[1.6, 3.9, 1.56], #whl
+                                 anchor_shift=[0.8, 1.95], #(horizontal=0.8 bouding box for hor car) , (vertical=1.95 bouding box for vert car)
                                  rotations=[0, np.pi / 2], #0 is horizontal
                                  dtype=np.float32):
 
@@ -727,6 +728,12 @@ def groundtruth_anchors_3d_generator( coords,
 
     ret_rot1 = np.concatenate((x_centers, y_centers, z_centers, sizes, rotations[:,:1]),axis=-1) #vertical #0
     ret_rot2 = np.concatenate((x_centers, y_centers, z_centers, sizes, rotations[:,1:]),axis=-1) #herizonal #pi/2
+
+    #add shift
+    anchor_shift = np.array(anchor_shift, dtype=dtype)
+    ret_rot1[:,0] = ret_rot1[:,0]+anchor_shift[0] #make (horizontal bouding  box) x offset car size of weight /2 (1.6/2)
+    ret_rot2[:,0] = ret_rot2[:,0]+anchor_shift[1] #make (vertical bouding box ) x offset car size of height /2 3.9/2)
+
     ret = np.concatenate((ret_rot1, ret_rot2)).astype(dtype)
     ############################################################################
 
@@ -786,6 +793,13 @@ def remove_outside_points(points, rect, Trv2c, P2, image_shape):
     indices = points_in_convex_polygon_3d_jit(points[:, :3], frustum_surfaces)
     points = points[indices.reshape([-1])]
     return points
+
+def split_points_in_boxes(points, boxes):
+    masks = points_in_rbbox(points, boxes)
+    in_box_mask = masks.any(-1)
+    in_points = points[in_box_mask]
+    out_points = points[np.logical_not(in_box_mask)]
+    return in_points, out_points
 
 
 @numba.jit(nopython=True)
