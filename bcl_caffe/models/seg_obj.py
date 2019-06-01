@@ -116,15 +116,19 @@ def segmentation(n, seg_points, label, phase):
                          param=[dict(lr_mult=1), dict(lr_mult=0.1)])
     # Predict class
     if phase == "train":
-        """
+
+        seg_preds = L.Permute(n.seg_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=1,H,W) -> (B,H,W,C=1)
+        seg_preds = L.Reshape(seg_preds, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=1)-> (B, -1, 1)
+        
         seg_weights = L.Python(label, name = "SegWeight",
                                python_param=dict(
                                                 module='bcl_layers',
                                                 layer='SegWeight'
                                                 ))
         
-        
-        n.loss= L.Python(n.seg_preds, label, seg_weights,
+        seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1, 1])))
+
+        n.loss= L.Python(seg_preds, label, seg_weights,
                          name = "FocalLoss",
                          loss_weight = 1,
                          python_param=dict(
@@ -132,8 +136,8 @@ def segmentation(n, seg_points, label, phase):
                          layer='WeightFocalLoss'
                          ),
                 param_str=str(dict(focusing_parameter=2, alpha=0.25)))
-        """
-        n.loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
+        
+        #n.loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
         n.accuracy = L.Accuracy(n.seg_preds, label)
         output = n.loss
     # Problem

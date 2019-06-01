@@ -19,7 +19,7 @@ from second.pytorch.builder import box_coder_builder, input_reader_builder
 from second.pytorch.models.voxel_encoder import get_paddings_indicator_np #for pillar
 from second.utils.log_tool import SimpleModelLog
 from tools import some_useful_tools as sut
-
+from second.core import box_np_ops
 def get_prototxt(solver_proto, save_path=None):
     if save_path:
         f = open(save_path, mode='w+')
@@ -452,54 +452,30 @@ class SolverWrapperTest:
         self._nms_iou_thresholds=[0.5] ## NOTE: double check #pillar use 0.5, second use 0.01
         self._post_center_range=list(model_cfg.post_center_limit_range) ## NOTE: double check
         self._use_direction_classifier=False ## NOTE: double check
-
+        cls_thresh = 0.6
         detections = []
         t = time.time()
 
         for i in tqdm(range(len(data_iter))):
             example = next(data_iter)
-            example.pop("metrics")
-            voxels = example['voxels']
-            coors = example['coordinates']
-            num_points = example['num_points']
-            # gt_coords = example['gt_boxes_coords']
-            # pos_reg_targets =example['pos_reg_targets']
-            # pos_labels =example['pos_labels']
-            #
-            # #for new method
-            # reg_targets, labels = self.GroundTruth2FeatMap(pos_labels, pos_reg_targets, gt_coords, self.fp_w, self.fp_h)
-            # reg_targets = reg_targets.reshape(1,-1, pos_reg_targets.shape[-1])
-            # labels = labels.reshape(1,-1)
-
-            # For pillar
-            # voxels=self.VoxelFeatureNet(voxels, coors, num_points) #(V,100,C) -> (B=1, C=9, V, N=100) #for pillar
-            #(B=1, C=9, V, N=100)
-
-            # For BCL
-            voxels = voxels.transpose(2, 1, 0) #(V=fixed,N=1,C=4) -> (C=4, N=1, V=fixed)
-            voxels = np.expand_dims(voxels, axis=0) # (C=4, N=1, V=fixed) -> (B=1, C=4, N=1, V=fixed)
-
-            self.solver.test_nets[0].blobs['top_prev'].reshape(*voxels.shape)
-            self.solver.test_nets[0].blobs['top_prev'].data[...] = voxels
-            self.solver.test_nets[0].blobs['top_lat_feats'].reshape(*coors.shape)
-            self.solver.test_nets[0].blobs['top_lat_feats'].data[...] = coors
+            seg_points = example['seg_points']
+            self.solver.test_nets[0].blobs['top_prev'].reshape(*seg_points.shape)
+            self.solver.test_nets[0].blobs['top_prev'].data[...] = seg_points
             self.solver.test_nets[0].forward()
-            cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...]
-            box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...]
+            #seg_cls_pred output shape (1,1,1,16000)
+            seg_cls_pred = self.solver.test_nets[0].blobs["output"].data[...].squeeze()
+            cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
+            box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...].reshape(1,16000,-1)
+            # Select car prediction and classification
 
-            ####################################################################
-            # C, H, W = box_preds.shape[1:]
-            # box_preds = box_preds.reshape(-1, self._num_anchor_per_loc,
-            #                            self._box_code_size, H, W).transpose(
-            #                                0, 1, 3, 4, 2)
-            #
-            # cls_preds = cls_preds.reshape(-1, self._num_anchor_per_loc,
-            #                            self._num_class, H, W).transpose(
-            #                                0, 1, 3, 4, 2)
-
-            ####################################################################
-
-            preds_dict = {"box_preds":box_preds, "cls_preds":cls_preds}
+            car_points = seg_points[:, (seg_cls_pred > cls_thresh)].squeeze()
+            cls_preds = cls_preds[:,(seg_cls_pred > cls_thresh)]
+            box_preds = box_preds[:,(seg_cls_pred > cls_thresh)]
+            car_points = car_points[:,:3][:,::-1]
+            ret = self.target_assigner.generate_anchors_from_gt(car_points)
+            anchors = ret["anchors"]
+            example["anchors"] = anchors
+            preds_dict = {"box_preds":box_preds.reshape(1,-1,7), "cls_preds":cls_preds.reshape(1,-1,1)}
 
             example = example_convert_to_torch(example, torch.float32)
             preds_dict = example_convert_to_torch(preds_dict, torch.float32)

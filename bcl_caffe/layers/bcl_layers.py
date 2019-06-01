@@ -68,7 +68,7 @@ class LossNormType(Enum):
 class DataFeature(caffe.Layer):
     def setup(self, bottom, top):
         # BCL
-        top[0].reshape(*(1, 4, 1, 12000)) # for pillar shape should (B,C=9,V,N=100), For second (B,C=1,V,N=5)
+        top[0].reshape(*(1, 16000, 4)) # for pillar shape should (B,C=9,V,N=100), For second (B,C=1,V,N=5)
         # Pillar
         # top[0].reshape(*(1, 9, 2000, 100)) # for pillar shape should (B,C=9,V,N=100), For second (B,C=1,V,N=5)
     def reshape(self, bottom, top):
@@ -81,7 +81,7 @@ class DataFeature(caffe.Layer):
 class LatticeFeature(caffe.Layer):
     def setup(self, bottom, top):
         # BCL
-        top[0].reshape(*(12000,4)) #(V, C=4) # TODO:
+        top[0].reshape(*(16000,4)) #(V, C=4) # TODO:
         # Pillar
         # top[0].reshape(*(2000,4)) #(V, C=4) # TODO:
     def reshape(self, bottom, top):
@@ -141,7 +141,7 @@ class InputKittiData(caffe.Layer):
         reg_targets = example['reg_targets']
         seg_points = example['seg_points']
         seg_labels = example['seg_labels']
-        
+
         """shuffle car seg points"""
         indices = np.arange(seg_labels.shape[1])
         np.random.shuffle(indices)
@@ -198,10 +198,10 @@ class SegWeight(caffe.Layer):
         top[0].data[...] = seg_weights
     def prepare_loss_weights(self,
                             labels,
-                            pos_cls_weight=1.0, 
+                            pos_cls_weight=1.0,
                             neg_cls_weight=1.0,
                             dtype="float32"):
-     
+
         positives = labels > 0
         negatives = labels == 0
         negative_cls_weights = negatives.astype(dtype) * neg_cls_weight
@@ -421,7 +421,7 @@ class BCLReshape(caffe.Layer):
         top[1].data[...] = top_lattice
     def backward(self, top, propagate_down, bottom):
         pass
-    def reshape_func(self, top_prev):   
+    def reshape_func(self, top_prev):
         top_prev = top_prev.transpose(0,2,1) #(1,N,4) -> (1,4,N)
         top_prev = np.expand_dims(top_prev,2) #(1,4,N) -> (1,4,,1,N)
         top_lattice = top_prev[:, :3, ...]

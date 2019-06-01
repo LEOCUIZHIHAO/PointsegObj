@@ -378,10 +378,29 @@ def prep_pointcloud(input_dict,
     if shuffle_points:
         # shuffle is a little slow.
         np.random.shuffle(points)
-    
-    points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
-    data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
-    
+
+    if training:
+        points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
+        data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
+
+        example = {
+        'seg_points': data,
+        'seg_labels': label,
+        }
+
+
+    if not training:
+        if len(points) > points_sample_size:
+            num_points = len(points)
+            num_points = np.random.choice(num_points, size=points_sample_size, replace=False) #not repeat sampling
+            points = points[num_points]
+            example = {'seg_points': points}
+        else:
+            num_points = len(points)
+            num_points = np.random.choice(num_points, size=points_sample_size, replace=True) #repeat sampling
+            points = points[num_points]
+            example = {'seg_points': points}
+
     """
     # check car points
     boxes_lidar = gt_dict["gt_boxes"]
@@ -389,11 +408,8 @@ def prep_pointcloud(input_dict,
     #cv2.imwrite('./car_points/car_points{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
     """
 
-    example = {
-        'seg_points': data,
-        'seg_labels': label,
-    }
-
+    #voxel_generator
+    """
     # [0, -40, -3, 70.4, 40, 1]
     voxel_size = voxel_generator.voxel_size
     pc_range = voxel_generator.point_cloud_range
@@ -401,8 +417,7 @@ def prep_pointcloud(input_dict,
     # [352, 400]
     t1 = time.time()
 
-    #voxel_generator
-    """
+
     if not multi_gpu:
         res = voxel_generator.generate(
             points, max_voxels)
@@ -431,8 +446,6 @@ def prep_pointcloud(input_dict,
 
     if calib is not None:
         example["calib"] = calib
-    feature_map_size = grid_size[:2] // out_size_factor
-    feature_map_size = [*feature_map_size, 1][::-1]
 
     if anchor_cache is not None:
         anchors = anchor_cache["anchors"]
@@ -464,6 +477,8 @@ def prep_pointcloud(input_dict,
 
         if not training:
             # for anchor free
+            feature_map_size = grid_size[:2] // out_size_factor
+            feature_map_size = [*feature_map_size, 1][::-1]
             ret = target_assigner.generate_anchors(feature_map_size)
             anchors_dict = target_assigner.generate_anchors_dict(feature_map_size)
             anchors = ret["anchors"]
@@ -499,21 +514,26 @@ def prep_pointcloud(input_dict,
             for k in anchors_dict[order_k].keys():
                 anchors_dict[order_k][k] = np.concatenate((anchors_dict[order_k][k], anchors_dict_gt[order_k][k]))
         """
+        if training:
+            # generate anchors from car points
+            points_in_box = points_in_box[:,:3] #xyz
+            points_in_box = points_in_box[:,::-1] #zyx
+            ret = target_assigner.generate_anchors_from_gt(points_in_box) #for GT generate anchors
+            anchors = ret["anchors"]
+            anchors_dict = target_assigner.generate_anchors_dict_from_gt(points_in_box) #for GT generate anchors
 
-        # generate anchors from car points
-        points_in_box = points_in_box[:,:3] #xyz
-        points_in_box = points_in_box[:,::-1] #zyx
-        ret = target_assigner.generate_anchors_from_gt(points_in_box) #for GT generate anchors
-        anchors = ret["anchors"]
-        anchors_dict = target_assigner.generate_anchors_dict_from_gt(points_in_box) #for GT generate anchors
+
+            anchors_bv = box_np_ops.rbbox2d_to_near_bbox(
+                anchors[:, [0, 1, 3, 4, 6]])
+            matched_thresholds = ret["matched_thresholds"]
+            unmatched_thresholds = ret["unmatched_thresholds"]
 
 
-        anchors_bv = box_np_ops.rbbox2d_to_near_bbox(
-            anchors[:, [0, 1, 3, 4, 6]])
-        matched_thresholds = ret["matched_thresholds"]
-        unmatched_thresholds = ret["unmatched_thresholds"]
+    #Warning If use anchro free move outside !
+    if training:
+        example["anchors"] = anchors
 
-    example["anchors"] = anchors
+
     anchors_mask = None
     if anchor_area_threshold >= 0:
         # slow with high resolution. recommend disable this forever.
