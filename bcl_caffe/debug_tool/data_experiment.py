@@ -137,10 +137,15 @@ max_voxels = 12000
 voxels_arr = []
 
 for example in tqdm(dataloader):
-    voxels = example['seg_points']
-    coors = example['seg_labels']
+    seg_points = example['seg_points']
+    seg_labels = example['seg_labels']
     reg_targets = example['reg_targets']
     labels = example['labels']
+    
+    #print('seg_points', seg_points.shape)
+    #print("seg_labels", seg_labels.shape)
+    print("reg_targets", reg_targets.shape)
+    print("labels", labels.shape)
 
 
 ################################################################################

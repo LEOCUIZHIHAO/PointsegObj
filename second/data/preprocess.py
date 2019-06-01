@@ -64,6 +64,27 @@ def PrepSegPoints(points_in_box, points_out_box, sample_size):
 
     return data, label
 
+
+def FillRegWithNeg(seg_labels, bbox_targets, anchors_labels, points_sample_size, num_anchor_per_loc):
+    bbox_targets_channel = bbox_targets.shape[-1]
+
+    if len(seg_labels) > len(anchors_labels):
+        gap = len(seg_labels) - len(anchors_labels) + points_sample_size # gap + another 12000
+        bbox_targets_fill = np.zeros(shape=(gap, bbox_targets_channel)) #fill with 0
+        anchors_labels_fill = -1*np.ones(shape=(gap)) #label -1
+        bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
+        anchors_labels = np.concatenate((anchors_labels, anchors_labels_fill), axis=0)
+
+    else:
+        gap = (points_sample_size * num_anchor_per_loc) - len(anchors_labels)
+        bbox_targets_fill = np.zeros(shape=(gap, bbox_targets_channel)) #fill with 0
+        anchors_labels_fill = -1 * np.ones(shape=(gap)) #label -1
+        bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
+        anchors_labels = np.concatenate((anchors_labels, anchors_labels_fill), axis=0)
+
+
+    return bbox_targets, anchors_labels 
+
 def Voxel3DStack2DWithZcoord(voxels, coors, num_points):
     voxels = np.concatenate((voxels,coors[:,1:2]), axis=1) #xyzr+Zcoord
     coords_xy = np.delete(coors, obj=0, axis=1) #yx
@@ -527,7 +548,7 @@ def prep_pointcloud(input_dict,
             unmatched_thresholds=unmatched_thresholds,
             importance=gt_dict["gt_importance"])
 
-        
+        """
         # bev anchors with points
         boxes_lidar = gt_dict["gt_boxes"]
         bev_map = simplevis.kitti_vis(points, boxes_lidar, gt_dict["gt_names"])
@@ -535,10 +556,10 @@ def prep_pointcloud(input_dict,
         ignored_anchors = anchors[targets_dict['labels'] == -1]
         bev_map = simplevis.draw_box_in_bev(bev_map, [0, -30, -3, 64, 30, 1], ignored_anchors, [128, 128, 128], 2) #ignored_anchors gray    #[0, -30, -3, 64, 30, 1] for kitti
         bev_map = simplevis.draw_box_in_bev(bev_map, [0, -30, -3, 64, 30, 1], assigned_anchors, [255, 0, 0]) #assigned_anchors blue
-        cv2.imwrite('car_points_anchors/anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+        # cv2.imwrite('car_points_anchors/anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
         # cv2.imshow('anchors', bev_map)
         # cv2.waitKey(0)
-        
+        """
 
         """
         # bev boxes_lidar with voxels (put z in to the plane)
@@ -560,6 +581,10 @@ def prep_pointcloud(input_dict,
         # cv2.imshow('heights', pp_map)
         # cv2.waitKey(0)
         """
+        
+        anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], points_sample_size, num_anchor_per_loc=2)
+        targets_dict['bbox_targets'] = anchors_bbox
+        targets_dict['labels'] = anchors_labels
 
         pos_idx = targets_dict['labels']==1 #positive
         example.update({
