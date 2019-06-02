@@ -60,6 +60,8 @@ def caffe_model(args, restore, pretrained, start_eval, visual_log):
 
         train_net = seg_obj.seg_object_detection(phase='train', dataset_params=args)
         eval_net = seg_obj.seg_object_detection(phase='eval', dataset_params=args)
+        # train_net = bcl_model_v3.bilateral_baseline(phase='train', dataset_params=args)
+        # eval_net = bcl_model_v3.bilateral_baseline(phase='eval', dataset_params=args)
 
         sut.write_proto([trian_proto_path, train_net],[eval_proto_path, eval_net])
 
@@ -91,7 +93,7 @@ def caffe_model(args, restore, pretrained, start_eval, visual_log):
 
     solver.train_model()
 
-def train(config_path, model_dir, restore=True, pretrained=False, start_eval=False, visual_log=False):
+def train(config_path, model_dir, restore=False, pretrained=False, start_eval=False, visual_log=False):
     args = {}
     args['config_path'] = config_path
     args['model_dir'] = model_dir

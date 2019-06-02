@@ -20,6 +20,10 @@ from second.pytorch.models.voxel_encoder import get_paddings_indicator_np #for p
 from second.utils.log_tool import SimpleModelLog
 from tools import some_useful_tools as sut
 from second.core import box_np_ops
+
+import cv2
+from second.utils import simplevis
+
 def get_prototxt(solver_proto, save_path=None):
     if save_path:
         f = open(save_path, mode='w+')
@@ -280,7 +284,6 @@ class TrainSolverWrapper:
         self.solver.net.params['reg_head'][0].data[...] = np.load(weights_path + rpn_conv[2]) #w box_head
         self.solver.net.params['reg_head'][1].data[...] = np.load(weights_path + rpn_conv[3]) #b box_head
 
-
 def build_network(model_cfg, measure_time=False):
     voxel_generator = voxel_builder.build(model_cfg.voxel_generator)
     bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
@@ -444,11 +447,12 @@ class SolverWrapperTest:
     def train_model(self):
         caffe.set_mode_gpu()
         caffe.set_device(0)
-        # self.load_pretrained_weight() #mannully load weights''='
-        # self.caffe_load_weight()
         self.segmentation_eval_on_val()
         # self.eval_on_val()
 
+    ############################################################################
+    # For Object detection evaluation
+    ############################################################################
     def eval_on_val(self):
         self.solver.test_nets[0].share_with(self.solver.net)
         _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
@@ -475,7 +479,7 @@ class SolverWrapperTest:
         self._nms_iou_thresholds=[0.5] ## NOTE: double check #pillar use 0.5, second use 0.01
         self._post_center_range=list(model_cfg.post_center_limit_range) ## NOTE: double check
         self._use_direction_classifier=False ## NOTE: double check
-        cls_thresh = 0.05
+        cls_thresh = 0.3
         detections = []
         t = time.time()
 
@@ -497,12 +501,19 @@ class SolverWrapperTest:
             car_points = car_points[:,:3][:,::-1]
             ret = self.target_assigner.generate_anchors_from_gt(car_points)
             anchors = ret["anchors"]
-            example["anchors"] = anchors
+            # anchor generated from generator shape (n_anchors, 7)
+            # needed to expand dim for prediction
+            example["anchors"] = np.expand_dims(anchors, 0)
             preds_dict = {"box_preds":box_preds.reshape(1,-1,7), "cls_preds":cls_preds.reshape(1,-1,1)}
 
             example = example_convert_to_torch(example, torch.float32)
             preds_dict = example_convert_to_torch(preds_dict, torch.float32)
             detections += self.predict(example, preds_dict)
+            ################ visualization #####################
+            # image_idx = example['metadata'][0]["image_idx"]
+            # boxes_lidar = detections[-1]["box3d_lidar"].cpu().detach().numpy()
+            # bev_map = simplevis.kitti_vis(seg_points.squeeze(), boxes_lidar)
+            # cv2.imwrite('./visualization/detect_eval_bv/detect_eval_bv{}.png'.format(image_idx), bev_map)
             # print(detections[-1])
         sec_per_ex = len(data_iter) / (time.time() - t)
         global_step = 1 ## TODO:
@@ -520,31 +531,6 @@ class SolverWrapperTest:
             model_logging.log_text("Evaluation {}".format(k), global_step)
             model_logging.log_text(v, global_step)
         model_logging.log_metrics(result_dict["detail"], global_step)
-
-    def segmentation_eval_on_val(self):
-        self.solver.test_nets[0].share_with(self.solver.net)
-        _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
-        voxel_generator, self.target_assigner = build_network(model_cfg)
-        dataloader = segmentation_dataloader(eval_input_cfg, model_cfg, voxel_generator, self.target_assigner, generate_anchors_cachae=False, segmentation_eval=True)
-        data_iter=iter(dataloader)
-
-        cls_thresh = 0.05
-        detections = []
-        for i in tqdm(range(len(data_iter))):
-            example = next(data_iter)
-            seg_points = example['seg_points']
-            seg_labels = example['seg_labels']
-            self.solver.test_nets[0].blobs['top_prev'].reshape(*seg_points.shape)
-            self.solver.test_nets[0].blobs['top_prev'].data[...] = seg_points
-            self.solver.test_nets[0].forward()
-            #seg_cls_pred output shape (1,1,1,16000)
-            seg_cls_pred = self.solver.test_nets[0].blobs["output"].data[...].squeeze()
-            cls_preds = self.solver.test_nets[0].blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
-            box_preds = self.solver.test_nets[0].blobs['f_box_preds'].data[...].reshape(1,16000,-1)
-            # Select car prediction and classification
-            #seg predictions
-            self.seg_predict(seg_cls_pred, seg_labels)
-
     def predict(self, example, preds_dict):
         """start with v1.6.0, this function don't contain any kitti-specific code.
         Returns:
@@ -825,197 +811,89 @@ class SolverWrapperTest:
 
         return predictions_dicts
 
-    def seg_predict(self, pred, gt):
+    ############################################################################
+    # For segmentation evaluation
+    ############################################################################
+    def segmentation_eval_on_val(self):
+        self.solver.test_nets[0].share_with(self.solver.net)
+        _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
+        voxel_generator, self.target_assigner = build_network(model_cfg)
+        dataloader = segmentation_dataloader(eval_input_cfg, model_cfg,
+                                                        voxel_generator,
+                                                        self.target_assigner,
+                                                        generate_anchors_cachae=False,
+                                                        segmentation_eval=True)
+        data_iter=iter(dataloader)
+
+        cls_thresh = 0.05
+        detections = []
+        for i in tqdm(range(len(data_iter))):
+            example = next(data_iter)
+            seg_points = example['seg_points']
+            seg_labels = example['seg_labels']
+            self.solver.test_nets[0].blobs['top_prev'].reshape(*seg_points.shape)
+            self.solver.test_nets[0].blobs['top_prev'].data[...] = seg_points
+            self.solver.test_nets[0].forward()
+            #seg_cls_pred output shape (1,1,1,16000)
+            seg_cls_pred = self.solver.test_nets[0].blobs["output"].data[...].squeeze()
+            #seg predictions
+            detections += self.seg_predict(seg_cls_pred, seg_labels, example=None) #if pass example then save seg vis
+
+            self.total_segmentation_result(detections)
+    def seg_predict(self, pred, gt, example=None):
+        ############### Params ###############
         cls_thresh = 0.5
+        pos_class = 1 # Car
+        neg_class = 0 # Others
+        scores = dict()
+        list_score = []
+        ############### Params ###############
+
         pred, gt = np.array(pred), np.array(gt)
         gt = np.squeeze(gt)
-        print("gt", gt.shape)
-        print("pred", pred.shape)
         pred = np.where(pred>cls_thresh, 1, 0)
+        # print("pred class distrubution : ", np.unique(pred , return_counts=True))#
 
-        print("pred class distrubution : ", np.unique(pred , return_counts=True))
-
-        scores = dict()
         labels = np.unique(gt)
         assert np.all([(v in labels) for v in np.unique(pred)])
 
-        TPs, FPs, FNs, Total = [], [], [], []
-        for l in labels:
-            TPs.append(sum((gt == l) * (pred == l)))
-            FPs.append(sum((gt != l) * (pred == l)))
-            FNs.append(sum((gt == l) * (pred != l)))
-            Total.append(sum(gt == l))
+        TPs = (sum((gt == pos_class) * (pred == pos_class)))
+        TNs = (sum((gt == neg_class) * (pred == neg_class)))
+        FPs = (sum((gt != pos_class) * (pred == pos_class)))
+        FNs = (sum((gt == pos_class) * (pred != pos_class)))
+        TargetTotal= (sum(gt == pos_class))
 
-        scores['accuracy'] = sum(gt == pred) / len(gt)
-        #scores['confusion'] = confusion_matrix(gt, pred)
-        scores['class_accuracy'] = [TPs[i] / (TPs[i] + FNs[i]) for i in range(len(labels))]
-        scores['class_iou'] = [TPs[i] / (TPs[i] + FNs[i] + FPs[i]) for i in range(len(labels))]
-        scores['num_points'] = Total
+        scores['accuracy'] = TPs / TargetTotal
+        scores['class_iou'] = TPs / (TPs + FNs + FPs)
+        scores['TPR'] = TPs / (TPs + FPs)
+        scores['FPR'] = FPs / (FPs + TNs)
 
-        return scores
+        if example is not None:
+            seg_points = example['seg_points']
+            image_idx = example['image_idx']
+            gt_boxes = example['gt_boxes']
+            pred_idx = np.where(pred>cls_thresh)
+            seg_points = np.squeeze(seg_points)
+            target = seg_points[pred_idx]
+            bev_map = simplevis.kitti_vis(target, gt_boxes)
+            cv2.imwrite('./visualization/seg_eval_bv/seg_eval_bv{}.png'.format(image_idx[0]), bev_map)
+            #cv2.imshow('pre-noise', bev_map)
+        list_score.append(scores)
 
-    """Load weight fromm caffe model"""
-    def caffe_load_weight(self):
-        exp_dir = "./exp/leo_debug/"
-        weight_name = "pp_iter_18560"
-        weight_path = os.path.join(exp_dir + weight_name)
-        net_ = caffe.Net(os.path.join(exp_dir + "train.prototxt"), "{}.caffemodel".format(weight_path), caffe.TRAIN)
+        return list_score
+    def total_segmentation_result(self, detections):
+        avg_accuracy=[]
+        avg_class_iou =[]
+        for det in detections:
+            avg_accuracy.append(det['accuracy'])
+            avg_class_iou.append(det['class_iou'])
 
-        self.solver.net.params['mlp_0'][0].data[...] = net_.params['mlp_0'][0].data[...]#w
-        self.solver.net.params['mlp_sc_0'][0].data[...] = net_.params['mlp_sc_0'][0].data[...]#w
-        self.solver.net.params['mlp_sc_0'][1].data[...] = net_.params['mlp_sc_0'][1].data[...]#b
-        self.solver.net.params['mlp_bn_0'][0].data[...] = net_.params['mlp_bn_0'][0].data[...]#mean
-        self.solver.net.params['mlp_bn_0'][1].data[...] = net_.params['mlp_bn_0'][1].data[...]#var
-        self.solver.net.params['mlp_bn_0'][2].data[...] = net_.params['mlp_bn_0'][2].data[...]
+        avg_accuracy = np.mean(np.array(avg_accuracy))
+        avg_class_iou = np.mean(np.array(avg_class_iou))
 
-        def rpn_layer(layer_name):
-            self.solver.net.params[str(layer_name[0])][0].data[...] = net_.params[str(layer_name[0])][0].data[...]#w
-
-            self.solver.net.params[str(layer_name[1])][0].data[...] = net_.params[str(layer_name[1])][0].data[...]#w
-            self.solver.net.params[str(layer_name[1])][1].data[...] = net_.params[str(layer_name[1])][1].data[...]#b
-
-            self.solver.net.params[str(layer_name[2])][0].data[...] = net_.params[str(layer_name[2])][0].data[...]#mean
-            self.solver.net.params[str(layer_name[2])][1].data[...] = net_.params[str(layer_name[2])][1].data[...]#var
-            self.solver.net.params[str(layer_name[2])][2].data[...] = net_.params[str(layer_name[2])][2].data[...]
-
-        ##################################block1################################
-        caffe_layre = ['ini_conv1_0', 'ini_conv1_sc_0', 'ini_conv1_bn_0']
-        rpn_layer(caffe_layre)
-
-        for idx in range(3):
-            caffe_layre = ['rpn_conv1_{}'.format(idx), 'rpn_conv1_sc_{}'.format(idx), 'rpn_conv1_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre)
-
-        caffe_layre = ['rpn_deconv1', 'rpn_deconv1_sc', 'rpn_deconv1_bn']
-        rpn_layer(caffe_layre)
-
-        ##################################block2################################
-        caffe_layre = ['ini_conv2_0', 'ini_conv2_sc_0', 'ini_conv2_bn_0']
-        rpn_layer(caffe_layre)
-
-        for idx in range(5):
-            caffe_layre = ['rpn_conv2_{}'.format(idx), 'rpn_conv2_sc_{}'.format(idx), 'rpn_conv2_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre)
-
-        caffe_layre = ['rpn_deconv2', 'rpn_deconv2_sc', 'rpn_deconv2_bn']
-        rpn_layer(caffe_layre)
-
-        ##################################block3################################
-        caffe_layre = ['ini_conv3_0', 'ini_conv3_sc_0', 'ini_conv3_bn_0']
-        rpn_layer(caffe_layre)
-
-        for idx in range(5):
-            caffe_layre = ['rpn_conv3_{}'.format(idx), 'rpn_conv3_sc_{}'.format(idx), 'rpn_conv3_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre)
-
-        caffe_layre = ['rpn_deconv3', 'rpn_deconv3_sc', 'rpn_deconv3_bn']
-        rpn_layer(caffe_layre)
-
-        ################################# Head ################################
-        self.solver.net.params['cls_head'][0].data[...] = net_.params['cls_head'][0].data[...]
-        self.solver.net.params['cls_head'][1].data[...] = net_.params['cls_head'][1].data[...]
-        self.solver.net.params['reg_head'][0].data[...] = net_.params['reg_head'][0].data[...]
-        self.solver.net.params['reg_head'][1].data[...] = net_.params['reg_head'][1].data[...]
-
-    """load pytourch weight"""
-    def prepare_pretrained(self, weights_path, layer_name):
-        weights = os.listdir(weights_path)
-
-        graph = [w for w in weights if layer_name in w]
-        layer_key = [int(m.split('_')[0]) for m in graph]
-        layer_dict = dict(zip(layer_key, graph))
-
-        keys = layer_dict.keys()
-        keys = sorted(keys)
-        layer_ordered = []
-        for k in keys:
-            layer_ordered.append(layer_dict[k])
-        # print(layer_ordered) #debug
-        return layer_ordered
-    def load_pretrained_weight(self):
-
-        weights_path = '/home/ubuntu/second.pytorch/second/output/model_weights/'
-        layer_name = 'voxel_feature'
-        mlp_Layer = self.prepare_pretrained(weights_path, layer_name)
-
-        self.solver.net.params['mlp_0'][0].data[...] = np.load(weights_path + mlp_Layer[0]) #w
-        self.solver.net.params['mlp_sc_0'][0].data[...] = np.load(weights_path + mlp_Layer[1]) #w
-        self.solver.net.params['mlp_sc_0'][1].data[...] = np.load(weights_path + mlp_Layer[2]) #b
-        self.solver.net.params['mlp_bn_0'][0].data[...] = np.load(weights_path + mlp_Layer[3]) #mean
-        self.solver.net.params['mlp_bn_0'][1].data[...] = np.load(weights_path + mlp_Layer[4]) #var
-        self.solver.net.params['mlp_bn_0'][2].data[...] = 1
-
-        def rpn_layer(layer_name, block, idx, stride):
-            self.solver.net.params[str(layer_name[0])][0].data[...] = np.load(weights_path + block[idx*stride]) #w
-
-            self.solver.net.params[str(layer_name[1])][0].data[...] = np.load(weights_path + block[idx*stride+1]) #w
-            self.solver.net.params[str(layer_name[1])][1].data[...] = np.load(weights_path + block[idx*stride+2]) #b
-
-            self.solver.net.params[str(layer_name[2])][0].data[...] = np.load(weights_path + block[idx*stride+3]) #mean
-            self.solver.net.params[str(layer_name[2])][1].data[...] = np.load(weights_path + block[idx*stride+4]) #var
-            self.solver.net.params[str(layer_name[2])][2].data[...] = 1
-
-        ##################################block1################################
-        layer_name = 'rpn.blocks.0'
-        rpn_block = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_block)
-        caffe_layre = ['ini_conv1_0', 'ini_conv1_sc_0', 'ini_conv1_bn_0']
-        rpn_layer(caffe_layre, rpn_block, idx=0, stride=5)
-
-        for idx in range(3):
-            caffe_layre = ['rpn_conv1_{}'.format(idx), 'rpn_conv1_sc_{}'.format(idx), 'rpn_conv1_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre, rpn_block, idx=idx+1, stride=5)
-
-        layer_name = 'rpn.deblocks.0'
-        rpn_deconv = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_deconv)
-        caffe_layre = ['rpn_deconv1', 'rpn_deconv1_sc', 'rpn_deconv1_bn']
-        rpn_layer(caffe_layre, rpn_deconv, idx=0, stride=5)
-
-
-
-        ##################################block2################################
-        layer_name = 'rpn.blocks.1'
-        rpn_block = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_block)
-        caffe_layre = ['ini_conv2_0', 'ini_conv2_sc_0', 'ini_conv2_bn_0']
-        rpn_layer(caffe_layre, rpn_block, idx=0, stride=5)
-
-        for idx in range(5):
-            caffe_layre = ['rpn_conv2_{}'.format(idx), 'rpn_conv2_sc_{}'.format(idx), 'rpn_conv2_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre, rpn_block, idx=idx+1, stride=5)
-
-        layer_name = 'rpn.deblocks.1'
-        rpn_deconv = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_deconv)
-        caffe_layre = ['rpn_deconv2', 'rpn_deconv2_sc', 'rpn_deconv2_bn']
-        rpn_layer(caffe_layre, rpn_deconv, idx=0, stride=5)
-
-        ##################################block3################################
-        layer_name = 'rpn.blocks.2'
-        rpn_block = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_block)
-        caffe_layre = ['ini_conv3_0', 'ini_conv3_sc_0', 'ini_conv3_bn_0']
-        rpn_layer(caffe_layre, rpn_block, idx=0, stride=5)
-
-
-        for idx in range(5):
-            caffe_layre = ['rpn_conv3_{}'.format(idx), 'rpn_conv3_sc_{}'.format(idx), 'rpn_conv3_bn_{}'.format(idx)]
-            rpn_layer(caffe_layre, rpn_block, idx=idx+1, stride=5)
-
-        layer_name = 'rpn.deblocks.2'
-        rpn_deconv = self.prepare_pretrained(weights_path, layer_name)
-        # print(rpn_deconv)
-        caffe_layre = ['rpn_deconv3', 'rpn_deconv3_sc', 'rpn_deconv3_bn']
-        rpn_layer(caffe_layre, rpn_deconv, idx=0, stride=5)
-
-        ################################# Head ################################
-        layer_name = 'rpn.conv'
-        rpn_conv = self.prepare_pretrained(weights_path, layer_name)
-        self.solver.net.params['cls_head'][0].data[...] = np.load(weights_path + rpn_conv[0]) #w cls_head
-        self.solver.net.params['cls_head'][1].data[...] = np.load(weights_path + rpn_conv[1]) #b cls_head
-        self.solver.net.params['reg_head'][0].data[...] = np.load(weights_path + rpn_conv[2]) #w box_head
-        self.solver.net.params['reg_head'][1].data[...] = np.load(weights_path + rpn_conv[3]) #b box_head
+        print('-------------------- Summary --------------------')
+        print('   Accuracy: {}'.format(avg_accuracy))
+        print('   Car IoU: {}'.format(avg_class_iou))
 
 """
 class EvalSolverWrapper:
@@ -1027,30 +905,14 @@ class EvalSolverWrapper:
         self.test_net = test_net
         self.weight = weight_path
 
-        if self.log_path is not None:
-            self.logw = LogWriter(self.log_path, sync_cycle=100)
-            with self.logw.mode('val') as logger:
-                self.sc_val_3d_easy_7 = logger.scalar("mAP3D_easy_7")
-                self.sc_val_3d_moder_7 = logger.scalar("mAP3D_moderate_7")
-                self.sc_val_3d_hard_7 = logger.scalar("mAP3D__hard_7")
-
     def train_model(self):
         caffe.set_mode_gpu()
         caffe.set_device(0)
         net = self.eval_kitti(self.test_net, self.weight)
         for i in tqdm(range(3769)):
             net.forward()
-            print(net.blobs['cls_preds'].data[...])
-
-
-        if self.log_path is not None:
-            step = self.solver.iter
-            map3d_easy_7 = net.blobs['e7'].data
-            map3d_moder_7 = net.blobs['m7'].data
-            map3d_hard_7 = net.blobs['h7'].data
-            self.sc_val_3d_easy_7.add_record(step, map3d_easy_7)
-            self.sc_val_3d_moder_7.add_record(step, map3d_moder_7)
-            self.sc_val_3d_easy_7.add_record(step, map3d_hard_7)
+            seg_cls_pred = net.blobs["output"].data[...].squeeze()
+            print(seg_cls_pred)
 
     def eval_kitti(self, eval_model, weight):
         net = caffe.Net(eval_model, weight, caffe.TEST)
