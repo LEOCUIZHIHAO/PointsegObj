@@ -93,7 +93,7 @@ def caffe_model(args, restore, pretrained, start_eval, visual_log):
 
     solver.train_model()
 
-def train(config_path, model_dir, restore=True, pretrained=False, start_eval=False, visual_log=False):
+def train(config_path, model_dir, restore=False, pretrained=False, start_eval=True, visual_log=False):
     args = {}
     args['config_path'] = config_path
     args['model_dir'] = model_dir

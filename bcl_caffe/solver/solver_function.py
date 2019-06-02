@@ -446,8 +446,8 @@ class SolverWrapperTest:
         caffe.set_device(0)
         # self.load_pretrained_weight() #mannully load weights''='
         # self.caffe_load_weight()
-        # self.segmentation_eval_on_val()
-        self.eval_on_val()
+        self.segmentation_eval_on_val()
+        # self.eval_on_val()
 
     def eval_on_val(self):
         self.solver.test_nets[0].share_with(self.solver.net)
@@ -825,8 +825,16 @@ class SolverWrapperTest:
 
         return predictions_dicts
 
-    def seg_predict(self,pred, gt):
+    def seg_predict(self, pred, gt):
+        cls_thresh = 0.5
         pred, gt = np.array(pred), np.array(gt)
+        gt = np.squeeze(gt)
+        print("gt", gt.shape)
+        print("pred", pred.shape)
+        pred = np.where(pred>cls_thresh, 1, 0)
+
+        print("pred class distrubution : ", np.unique(pred , return_counts=True))
+
         scores = dict()
         labels = np.unique(gt)
         assert np.all([(v in labels) for v in np.unique(pred)])
@@ -839,11 +847,9 @@ class SolverWrapperTest:
             Total.append(sum(gt == l))
 
         scores['accuracy'] = sum(gt == pred) / len(gt)
-        scores['confusion'] = confusion_matrix(gt, pred)
+        #scores['confusion'] = confusion_matrix(gt, pred)
         scores['class_accuracy'] = [TPs[i] / (TPs[i] + FNs[i]) for i in range(len(labels))]
-        scores['avg_class_accuracy'] = sum(scores['class_accuracy']) / len(labels)
         scores['class_iou'] = [TPs[i] / (TPs[i] + FNs[i] + FPs[i]) for i in range(len(labels))]
-        scores['avg_class_iou'] = sum(scores['class_iou']) / len(labels)
         scores['num_points'] = Total
 
         return scores
