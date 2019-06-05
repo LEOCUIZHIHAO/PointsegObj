@@ -20,10 +20,10 @@ from second.pytorch.models.voxel_encoder import get_paddings_indicator_np #for p
 from second.utils.log_tool import SimpleModelLog
 from tools import some_useful_tools as sut
 from second.core import box_np_ops
+import pickle
 
 import cv2
 from second.utils import simplevis
-import pickle
 
 def get_prototxt(solver_proto, save_path=None):
     if save_path:
@@ -35,11 +35,15 @@ def get_prototxt(solver_proto, save_path=None):
 
     return f.name
 
-class TrainSolverWrapper:
+class SolverWrapper:
     def __init__(self,  train_net,
+                        test_net,
                         save_path,
-                        prefix,
-                        pretrained,
+                        pretrain = None,
+                        prefix = "pp",
+                        model_dir=None,
+                        config_path=None,
+                        ### Solver Params ###
                         solver_type='ADAM',
                         weight_decay=0.001,
                         base_lr=0.002,
@@ -55,11 +59,11 @@ class TrainSolverWrapper:
                         debug_info=False,
                         create_prototxt=True,
                         log_path=None,
-                        keep_topk=8):
+                        args=None):
         """Initialize the SolverWrapper."""
+        self.test_net = test_net
         self.solver_param = caffe_pb2.SolverParameter()
         self.solver_param.train_net = train_net
-
         self.solver_param.test_initialization = False
 
         self.solver_param.base_lr = base_lr
@@ -91,50 +95,46 @@ class TrainSolverWrapper:
 
         self.solver = caffe.get_solver(solver_prototxt)
 
-        self.pretrained = pretrained
-        if self.pretrained is not None:
-            self.pretrain_path = self.pretrained['pretrain_path']
-            self.pretrain_weight_name =self.pretrained['pretrain_weight_name']
-
-        self.keep_topk = keep_topk
-        self.test_interval = 1856*2 #1856  #replace self.solver_param.test_interval #9280
+        self.test_interval = test_interval #1856  #replace self.solver_param.test_interval #9280
         self.save_path = save_path
 
-        self.log_path = log_path
-        if self.log_path is not None:
-            self.logw = LogWriter(self.log_path, sync_cycle=100)
-            with self.logw.mode('train') as logger:
-                self.sc_train_reg_loss = logger.scalar("reg_loss")
-                self.sc_train_cls_loss = logger.scalar("cls_loss")
+        '''Model config parameter Initialization'''
+        self.args = args
+        self.model_dir, self.config_path = model_dir, config_path
+        _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
+        voxel_generator, self.target_assigner = build_network(model_cfg)
+        self.dataloader, self.eval_dataset = load_dataloader(eval_input_cfg, model_cfg, voxel_generator,
+                                        self.target_assigner, args = args)
 
-    def load_solver(self):
-        return self.solver
+        # NOTE: Could have problem, if eval no good check here
+        self._box_coder=self.target_assigner.box_coder
+        classes_cfg = model_cfg.target_assigner.class_settings
+        self._num_class = len(classes_cfg)
+        self._encode_background_as_zeros = model_cfg.encode_background_as_zeros
+        self._nms_class_agnostic=model_cfg.nms_class_agnostic
+        self._use_multi_class_nms=[c.use_multi_class_nms for c in classes_cfg]
+        self._nms_pre_max_sizes=[c.nms_pre_max_size for c in classes_cfg]
+        self._multiclass_nms=all(self._use_multi_class_nms)
+        self._use_sigmoid_score=model_cfg.use_sigmoid_score
+        self._num_anchor_per_loc=self.target_assigner.num_anchors_per_location
 
-    def train_model(self):
-        if self.pretrained is not None:
-            print("\n[info] Load Pretrained Model\n")
-            self.load_pretrained_caffe_weight(self.pretrain_path, self.pretrain_weight_name)
+        self._use_rotate_nms=[c.use_rotate_nms for c in classes_cfg]  #False for pillar, True for second
+        self._nms_post_max_sizes=[c.nms_post_max_size for c in classes_cfg] #300 for pillar, 100 for second
+        self._nms_score_thresholds=[c.nms_score_threshold for c in classes_cfg] # 0.4 in submit, but 0.3 can get better hard performance #pillar use 0.05, second 0.3
+        self._nms_iou_thresholds=[c.nms_iou_threshold for c in classes_cfg] ## NOTE: double check #pillar use 0.5, second use 0.01
+        self._post_center_range=list(model_cfg.post_center_limit_range) ## NOTE: double check
+        self._use_direction_classifier=model_cfg.use_direction_classifier ## NOTE: double check
+        self.cls_thresh = 0.3
+        path = pretrain["path"]
+        weight = pretrain["weight"]
+        if path != None and weight != None:
+            self.load_pretrained_caffe_weight(path, weight)
 
-        cur_iter = 0
-        while cur_iter < self.solver_param.max_iter:
-            for i in range(self.test_interval):
-                self.solver.step(1)
-                if self.log_path is not None:
-                    step = self.solver.iter
-                    reg_loss = self.solver.net.blobs['reg_loss'].data
-                    cls_loss = self.solver.net.blobs['cls_loss'].data
 
-                    self.sc_train_reg_loss.add_record(step, reg_loss)
-                    self.sc_train_cls_loss.add_record(step, cls_loss) # for logger
-
-            #always keep top 8 caffemodel
-            sut.clear_caffemodel(self.save_path, self.keep_topk)
-            cur_iter += self.test_interval
-
-    def load_pretrained_caffe_weight(self, path, weight_name):
+    def load_pretrained_caffe_weight(self, path, weight_path):
         print("### Start loading pretrained caffe weights")
         old_proto_path = os.path.join(path, "train.prototxt")
-        old_weight_path = os.path.join(path, weight_name)
+        old_weight_path = os.path.join(path, weight_path)
         print("### Load old caffe model")
         old_net = caffe.Net(old_proto_path, old_weight_path, caffe.TRAIN)
         print("### Start loading model layers")
@@ -150,234 +150,97 @@ class TrainSolverWrapper:
                     continue
         print("### Finish loading pretrained model")
 
-def build_network(model_cfg, measure_time=False):
-    voxel_generator = voxel_builder.build(model_cfg.voxel_generator)
-    bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
-    box_coder = box_coder_builder.build(model_cfg.box_coder)
-    target_assigner_cfg = model_cfg.target_assigner
-    target_assigner = target_assigner_builder.build(target_assigner_cfg,
-                                                    bv_range, box_coder)
-    # box_coder.custom_ndim = target_assigner._anchor_generators[0].custom_ndim
-
-    return voxel_generator, target_assigner
-
-def _worker_init_fn(worker_id):
-    time_seed = np.array(time.time(), dtype=np.int32)
-    np.random.seed(time_seed + worker_id)
-    print(f"WORKER {worker_id} seed:", np.random.get_state()[1][0])
-
-def load_config(model_dir, config_path):
-    model_dir = str(Path(model_dir).resolve())
-    model_dir = Path(model_dir)
-    config_file_bkp = "pipeline.config"
-    if isinstance(config_path, str):
-        # directly provide a config object. this usually used
-        # when you want to train with several different parameters in
-        # one script.
-        config = pipeline_pb2.TrainEvalPipelineConfig()
-        with open(config_path, "r") as f:
-            proto_str = f.read()
-            text_format.Merge(proto_str, config)
-    else:
-        config = config_path
-        proto_str = text_format.MessageToString(config, indent=2)
-    with (model_dir / config_file_bkp).open("w") as f:
-        f.write(proto_str)
-
-    input_cfg = config.train_input_reader
-    eval_input_cfg = config.eval_input_reader
-    model_cfg = config.model.second
-    train_cfg = config.train_config
-
-
-    return (input_cfg, eval_input_cfg, model_cfg, train_cfg)
-
-def log_function(model_dir, config_path):
-    model_logging = SimpleModelLog(model_dir)
-    model_logging.open()
-
-    config = pipeline_pb2.TrainEvalPipelineConfig()
-    with open(config_path, "r") as f:
-        proto_str = f.read()
-        text_format.Merge(proto_str, config)
-
-    model_logging.log_text(proto_str + "\n", 0, tag="config")
-    return model_logging
-
-def load_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner,generate_anchors_cachae):
-    eval_dataset = input_reader_builder.build(
-        eval_input_cfg,
-        model_cfg,
-        training=False,
-        voxel_generator=voxel_generator,
-        target_assigner=target_assigner,
-        generate_anchors_cachae=generate_anchors_cachae,
-        segmentation_eval=False) #True FOR Pillar, False For BCL
-
-    eval_dataloader = torch.utils.data.DataLoader(
-        eval_dataset,
-        batch_size=eval_input_cfg.batch_size, # only support multi-gpu train
-        shuffle=False,
-        num_workers=eval_input_cfg.preprocess.num_workers,
-        pin_memory=False,
-        collate_fn=merge_second_batch)
-
-    return eval_dataloader, eval_dataset
-
-def segmentation_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner,generate_anchors_cachae, segmentation_eval):
-    seg_eval_dataset = input_reader_builder.build(
-        eval_input_cfg,
-        model_cfg,
-        training=False,
-        voxel_generator=voxel_generator,
-        target_assigner=target_assigner,
-        generate_anchors_cachae=generate_anchors_cachae,
-        segmentation_eval=segmentation_eval)
-
-    seg_eval_dataloader = torch.utils.data.DataLoader(
-        seg_eval_dataset,
-        batch_size=eval_input_cfg.batch_size, # only support multi-gpu train
-        shuffle=False,
-        num_workers=eval_input_cfg.preprocess.num_workers,
-        pin_memory=False,
-        collate_fn=merge_second_batch)
-
-    return seg_eval_dataloader
-
-def example_convert_to_torch(example, dtype=torch.float32,
-                             device=None) -> dict:
-    device = device or torch.device("cuda:0")
-    example_torch = {}
-    float_names = [
-        "voxels", "anchors", "reg_targets", "reg_weights", "bev_map", "importance"
-    ]
-    for k, v in example.items():
-        if k in float_names:
-            # slow when directly provide fp32 data with dtype=torch.half
-            example_torch[k] = torch.tensor(
-                v, dtype=torch.float32, device=device).to(dtype)
-        elif k in ["coordinates", "labels", "num_points"]:
-            example_torch[k] = torch.tensor(
-                v, dtype=torch.int32, device=device)
-        elif k in ["anchors_mask"]:
-            example_torch[k] = torch.tensor(
-                v, dtype=torch.uint8, device=device)
-        elif k == "calib":
-            calib = {}
-            for k1, v1 in v.items():
-                calib[k1] = torch.tensor(
-                    v1, dtype=dtype, device=device).to(dtype)
-            example_torch[k] = calib
-        elif k == "num_voxels":
-            example_torch[k] = torch.tensor(v)
-        elif k in ["box_preds", "cls_preds"]:
-            example_torch[k] = torch.tensor(
-                v, dtype=torch.float32, device=device).to(dtype)
-        else:
-            example_torch[k] = v
-    return example_torch
-
-class SolverWrapperTest:
-    def __init__(self,
-                        test_net,
-                        eval_weights,
-                        prefix,
-                        pretrained,
-                        model_dir=None,
-                        config_path=None,):
-        """Initialize the SolverWrapper."""
-        self.net = caffe.Net(test_net, eval_weights, caffe.TEST)
-        self.pretrained = pretrained
-        self.model_dir = model_dir
-        self.config_path = config_path
-
-    def load_solver(self):
-        return self.solver
     def train_model(self):
-        caffe.set_mode_gpu()
-        caffe.set_device(0)
-        self.eval_on_val(self.net)
+        cur_iter = self.solver.iter
+        self.model_logging = log_function(self.model_dir, self.config_path)
+        while cur_iter < self.solver_param.max_iter:
+            for i in range(self.test_interval):
+                self.solver.step(1)
+                if self.log_path is not None:
+                    step = self.solver.iter
+                    reg_loss = self.solver.net.blobs['reg_loss'].data
+                    cls_loss = self.solver.net.blobs['cls_loss'].data
 
-    ############################################################################
-    # For Object detection evaluation
-    ############################################################################
-    def eval_on_val(self, net):
-        _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
-        voxel_generator, self.target_assigner = build_network(model_cfg)
-        dataloader, eval_dataset = load_dataloader(eval_input_cfg, model_cfg, voxel_generator, self.target_assigner, generate_anchors_cachae=False) #True FOR Pillar, False For BCL
-        model_logging = log_function(self.model_dir, self.config_path)
-        data_iter=iter(dataloader)
+                    self.sc_train_reg_loss.add_record(step, reg_loss)
+                    self.sc_train_cls_loss.add_record(step, cls_loss) # for logger
 
-        self._box_coder=self.target_assigner.box_coder
-        self._num_class=1
-        self._encode_background_as_zeros =True
-        self._nms_class_agnostic=False
-        self._class_name="Car"
-        self._use_multi_class_nms=False
-        self._nms_pre_max_sizes=[1000]
-        self._multiclass_nms=False
-        self._use_sigmoid_score=True
-        self._num_anchor_per_loc=2
-        self._box_code_size = 7
+            #always keep top 12 caffemodel
+            self.evaluation(cur_iter)
+            # self.segmentation_evaluation(cur_iter)
+            sut.clear_caffemodel(self.save_path, 8)
+            cur_iter += self.test_interval
 
-        self._use_rotate_nms=False  #False for pillar, True for second
-        self._nms_post_max_sizes=[100] #300 for pillar, 100 for second
-        self._nms_score_thresholds=[0.8] # 0.4 in submit, but 0.3 can get better hard performance #pillar use 0.05, second 0.3
-        self._nms_iou_thresholds=[0.5] ## NOTE: double check #pillar use 0.5, second use 0.01
-        self._post_center_range=list(model_cfg.post_center_limit_range) ## NOTE: double check
-        self._use_direction_classifier=False ## NOTE: double check
-        cls_thresh = 0.3
+    def evaluation(self, global_step):
+        print("Initialize test net")
+        test_net = caffe.Net(self.test_net, caffe.TEST)
+        print("Load train net weights")
+        test_net.share_with(self.solver.net)
+        data_iter=iter(self.dataloader)
         detections = []
         t = time.time()
+        sec_per_ex = len(data_iter) / (time.time() - t)
+        model_dir = str(Path(self.model_dir).resolve())
+        model_dir = Path(model_dir)
+        result_path = model_dir / 'results'
+        result_path_step = result_path / f"step_{global_step}"
+        result_path_step.mkdir(parents=True, exist_ok=True)
 
         for i in tqdm(range(len(data_iter))):
             example = next(data_iter)
-            seg_points = example['seg_points']
-            net.blobs['top_prev'].reshape(*seg_points.shape)
-            net.blobs['top_prev'].data[...] = seg_points
-            net.forward()
+            # points = example['seg_points'] # Pointseg
+            voxels = example['voxels']
+            coors = example['coordinates']
+            # num_points = example['num_points']
+            # test_net.blobs['top_prev'].reshape(*points.shape)
+            # test_net.blobs['top_prev'].data[...] = points
+            # test_net.forward()
+            test_net.blobs['top_prev'].reshape(*voxels.shape)
+            test_net.blobs['top_prev'].data[...] = voxels
+            test_net.blobs['top_lat_feats'].reshape(*coors.shape)
+            test_net.blobs['top_lat_feats'].data[...] = coors
+            test_net.forward()
+            cls_preds = test_net.blobs['f_cls_preds'].data[...]
+            box_preds = test_net.blobs['f_box_preds'].data[...]
             #seg_cls_pred output shape (1,1,1,16000)
-            seg_cls_pred = net.blobs["output"].data[...].squeeze()
-            cls_preds = net.blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
-            box_preds = net.blobs['f_box_preds'].data[...].reshape(1,16000,-1)
+            # seg_cls_pred = test_net.blobs["output"].data[...].squeeze()
+            # cls_preds = test_net.blobs['f_cls_preds'].data[...].reshape(1,16000,-1)
+            # box_preds = test_net.blobs['f_box_preds'].data[...].reshape(1,16000,-1)
             # Select car prediction and classification
-
-            car_points = seg_points[:, (seg_cls_pred > cls_thresh)].squeeze()
-            cls_preds = cls_preds[:,(seg_cls_pred > cls_thresh)]
-            box_preds = box_preds[:,(seg_cls_pred > cls_thresh)]
-            car_points = car_points[:,:3][:,::-1]
-            ret = self.target_assigner.generate_anchors_from_gt(car_points)
-            anchors = ret["anchors"]
+            # car_points = points[:, (seg_cls_pred > self.cls_thresh)].squeeze()
+            # cls_preds = cls_preds[:,(seg_cls_pred > self.cls_thresh)]
+            # box_preds = box_preds[:,(seg_cls_pred > self.cls_thresh)]
+            # Reverse coordinate for anchor generator
+            # car_points = car_points[:,:3][:,::-1]
+            # ret = self.target_assigner.generate_anchors_from_gt(car_points)
+            # anchors = ret["anchors"]
             # anchor generated from generator shape (n_anchors, 7)
             # needed to expand dim for prediction
-            example["anchors"] = np.expand_dims(anchors, 0)
-            preds_dict = {"box_preds":box_preds.reshape(1,-1,7), "cls_preds":cls_preds.reshape(1,-1,1)}
+            # example["anchors"] = np.expand_dims(anchors, 0)
+            # preds_dict = {"box_preds":box_preds.reshape(1,-1,7), "cls_preds":cls_preds.reshape(1,-1,1)}
+            preds_dict = {"box_preds":box_preds, "cls_preds":cls_preds}
 
             example = example_convert_to_torch(example, torch.float32)
             preds_dict = example_convert_to_torch(preds_dict, torch.float32)
             detections += self.predict(example, preds_dict)
             ################ visualization #####################
             # image_idx = example['metadata'][0]["image_idx"]
-            # boxes_lidar = detections[-1]["box3d_lidar"].cpu().detach().numpy()
-            # bev_map = simplevis.kitti_vis(seg_points.squeeze(), boxes_lidar)
-            # cv2.imwrite('./visualization/detect_eval_bv/detect_eval_bv{}.png'.format(image_idx), bev_map)
-            # print(detections[-1])
-        sec_per_ex = len(data_iter) / (time.time() - t)
-        global_step = 1 ## TODO:
-        model_dir = str(Path(self.model_dir).resolve())
-        model_dir = Path(model_dir)
-        result_path = model_dir / 'results'
-        result_path_step = result_path / f"step_{1}"
-        result_path_step.mkdir(parents=True, exist_ok=True)
-        model_logging.log_text(
-            f'generate label finished({sec_per_ex:.2f}/s). start eval:',
+            pd_boxes = detections[-1]["box3d_lidar"].cpu().detach().numpy()
+            # voxels = voxels.reshape(-1,4)[:,:-1] #(V, N, C)
+            # # bev_map = simplevis.kitti_vis(voxels, pd_boxes)
+            # # cv2.imwrite('./visualization/2d_visual_eval/detect_eval_bv{}.png'.format(image_idx), bev_map)
+            with open(os.path.join(result_path_step,"pd_boxes.pkl") , 'ab') as f:
+                pickle.dump(pd_boxes,f)
+
+        self.model_logging.log_text(
+            f'generate label finished({sec_per_ex:.2f}/s). start eval at step {global_step:.2f}:',
             global_step)
-        result_dict = eval_dataset.dataset.evaluation(
+        result_dict = self.eval_dataset.dataset.evaluation(
             detections, str(result_path_step))
         for k, v in result_dict["results"].items():
-            model_logging.log_text("Evaluation {}".format(k), global_step)
-            model_logging.log_text(v, global_step)
-        model_logging.log_metrics(result_dict["detail"], global_step)
+            self.model_logging.log_text("Evaluation {}".format(k), global_step)
+            self.model_logging.log_text(v, global_step)
+        self.model_logging.log_metrics(result_dict["detail"], global_step)
+
     def predict(self, example, preds_dict):
         """start with v1.6.0, this function don't contain any kitti-specific code.
         Returns:
@@ -392,6 +255,7 @@ class SolverWrapperTest:
             }
         """
         batch_size = example['anchors'].shape[0]
+        print(batch_size)
         if "metadata" not in example or len(example["metadata"]) == 0:
             meta_list = [None] * batch_size
         else:
@@ -408,7 +272,6 @@ class SolverWrapperTest:
         batch_cls_preds = preds_dict["cls_preds"]
         batch_box_preds = batch_box_preds.view(batch_size, -1,
                                                self._box_coder.code_size)
-
         num_class_with_bg = self._num_class
         if not self._encode_background_as_zeros:
             num_class_with_bg = self._num_class + 1
@@ -423,7 +286,6 @@ class SolverWrapperTest:
                                                    self._num_direction_bins)
         else:
             batch_dir_preds = [None] * batch_size
-
         predictions_dicts = []
         post_center_range = None
         if len(self._post_center_range) > 0:
@@ -454,10 +316,6 @@ class SolverWrapperTest:
                 else:
                     total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
             # Apply NMS in birdeye view
-            # Jim added
-            # print("each score: ", total_scores)
-            # print("total_scores > 0.05:" , np.unique(total_scores.cpu().detach().numpy() > 0.05,
-            #                                             return_counts = True))
             # print("total_scores > 0.3:" , np.unique(total_scores.cpu().detach().numpy() > 0.3,
             #                                             return_counts = True))
             if self._use_rotate_nms:
@@ -571,7 +429,7 @@ class SolverWrapperTest:
                 if self._nms_score_thresholds[0] > 0.0:
                     top_scores_keep = top_scores >= self._nms_score_thresholds[0]
                     top_scores = top_scores.masked_select(top_scores_keep)
-                    print("nms_score_thresholds is {} and found {} cars ".format(self._nms_score_thresholds, len(top_scores)))
+                    print("nms_thres is {} selected {} cars ".format(self._nms_score_thresholds, len(top_scores)))
                 if top_scores.shape[0] != 0:
                     if self._nms_score_thresholds[0] > 0.0:
                         box_preds = box_preds[top_scores_keep]
@@ -598,6 +456,14 @@ class SolverWrapperTest:
                     selected = []
                 # if selected is not None:
                 selected_boxes = box_preds[selected]
+
+                #Eval debug
+                eval_idx = example['metadata'][0]['image_idx']
+                eval_obj_num = example['gt_num']
+                detetion_error = eval_obj_num-len(selected_boxes)
+                print("IoU_thresh is {} remove {} overlap".format(self._nms_iou_thresholds, (len(box_preds)-len(selected_boxes))))
+                print("Eval img_{} have {} Object, detected {} Object, error {} ".format(eval_idx, eval_obj_num, len(selected_boxes), detetion_error))
+
                 if self._use_direction_classifier:
                     selected_dir_labels = dir_labels[selected]
                 selected_labels = top_labels[selected]
@@ -658,61 +524,57 @@ class SolverWrapperTest:
 
         return predictions_dicts
 
-class SegEval:
-    def __init__(self,
-                        test_net,
-                        eval_weights,
-                        prefix,
-                        pretrained,
-                        model_dir=None,
-                        config_path=None,):
-        """Initialize the SolverWrapper."""
-        self.net = caffe.Net(test_net, eval_weights, caffe.TEST)
-        self.pretrained = pretrained
-        self.model_dir = model_dir
-        self.config_path = config_path
-        self.seg_pred_vis_path = "./visualization/3d_visual_eval/seg_points.pkl"
-
-    def load_solver(self):
-        return self.solver
-    def train_model(self):
-        caffe.set_mode_gpu()
-        caffe.set_device(0)
-        self.segmentation_eval_on_val(self.net)
-
     ############################################################################
     # For segmentation evaluation
     ############################################################################
-    def segmentation_eval_on_val(self, net):
+    def segmentation_evaluation(self, global_step):
+        print("Initialize test net")
+        test_net = caffe.Net(self.test_net, caffe.TEST)
+        print("Load train net weights")
+        test_net.share_with(self.solver.net)
         _, eval_input_cfg, model_cfg, train_cfg = load_config(self.model_dir, self.config_path)
         voxel_generator, self.target_assigner = build_network(model_cfg)
-        dataloader = segmentation_dataloader(eval_input_cfg, model_cfg,
+        ## TODO:
+        dataloader, _= load_dataloader(eval_input_cfg, model_cfg,
                                                         voxel_generator,
                                                         self.target_assigner,
-                                                        generate_anchors_cachae=False,
-                                                        segmentation_eval=True)
+                                                        args = self.args)
         data_iter=iter(dataloader)
-
-
         try:
             os.remove(self.seg_pred_vis_path) #remove vis
             print("\n[INFO]Remove existing pickle file\n")
         except Exception as e:
             print("\n[INFO] No segmentation visualization pickle file\n")
 
+        t = time.time()
+        sec_per_ex = len(data_iter) / (time.time() - t)
+        model_dir = str(Path(self.model_dir).resolve())
+        model_dir = Path(model_dir)
+        result_path = model_dir / 'results'
+        result_path_step = result_path / f"step_{global_step}"
+        result_path_step.mkdir(parents=True, exist_ok=True)
+
         detections = []
         for i in tqdm(range(len(data_iter))):
             example = next(data_iter)
-            seg_points = example['seg_points']
-            net.blobs['top_prev'].reshape(*seg_points.shape)
-            net.blobs['top_prev'].data[...] = seg_points
-            net.forward()
+            points = example['seg_points']
+            test_net.blobs['top_prev'].reshape(*points.shape)
+            test_net.blobs['top_prev'].data[...] = points
+            test_net.forward()
             #seg_cls_pred output shape (1,1,1,16000)
-            seg_cls_pred = net.blobs["output"].data[...].squeeze()
-            detections += self.seg_predict(seg_cls_pred, example, vis=True) #if pass example then save seg vis
-        self.total_segmentation_result(detections)
+            seg_cls_pred = test_net.blobs["output"].data[...].squeeze()
+            detections += self.seg_predict(seg_cls_pred, example, result_path_step, vis=False) #if pass example then save seg vis
+        result_dict = self.total_segmentation_result(detections)
 
-    def seg_predict(self, pred, example, vis=False):
+        self.model_logging.log_text(
+            f'generate label finished({sec_per_ex:.2f}/s). start eval at step {global_step:.2f}:',
+            global_step)
+        for k, v in result_dict["results"].items():
+            self.model_logging.log_text("Evaluation {}".format(k), global_step)
+            self.model_logging.log_text(v, global_step)
+        self.model_logging.log_metrics(result_dict["detail"], global_step)
+
+    def seg_predict(self, pred, example, result_path_step, vis=False):
         gt = example['seg_labels']
         ############### Params ###############
         eps = 1e-5
@@ -737,47 +599,172 @@ class SegEval:
 
         scores['accuracy'] = TPs / (TargetTotal + eps)
         scores['class_iou'] = TPs / ((TPs + FNs + FPs) + eps)
+        scores['precision'] = TPs / ((TPs + FPs) + eps)
         # scores['TPR'] = TPs / (TPs + FPs)
         # scores['FPR'] = FPs / (FPs + TNs)
+        points = example['seg_points']
+        # image_idx = example['image_idx']
+        pred_idx = np.where(pred>cls_thresh)
+        points = np.squeeze(points)
+        pd_points = points[pred_idx]
 
+        with open(os.path.join(result_path_step, "seg_points.pkl"), 'ab') as f:
+            pickle.dump(pd_points,f)
         if vis:
-            seg_points = example['seg_points']
             image_idx = example['image_idx']
             gt_boxes = example['gt_boxes']
-            pred_idx = np.where(pred>cls_thresh)
-            seg_points = np.squeeze(seg_points)
-            target = seg_points[pred_idx]
-            # bev_map = simplevis.kitti_vis(target, gt_boxes)
+            # pred_idx = np.where(pred>cls_thresh)
+            # bev_map = simplevis.kitti_vis(pd_points, gt_boxes)
             # cv2.imwrite('./visualization/seg_eval_bv/seg_bv{}.png'.format(image_idx[0]), bev_map)
-            with open(self.seg_pred_vis_path, 'ab') as f:
-                pickle.dump(target,f)
-
+            with open(os.path.join(result_path_step, "image_idx.pkl"), 'ab') as f:
+                pickle.dump(image_idx,f)
+            with open(os.path.join(result_path_step, "points.pkl"), 'ab') as f:
+                pickle.dump(points,f)
+            with open(os.path.join(result_path_step, "gt_boxes.pkl"), 'ab') as f:
+                pickle.dump(gt_boxes,f)
             ######################### For Ground Truth##########################
-            # gt_bev_map = simplevis.kitti_vis(seg_points, gt_boxes)
+            # gt_bev_map = simplevis.kitti_vis(points, gt_boxes)
             # cv2.imwrite('./visualization/seg_eval_bv/gt_seg_bv{}.png'.format(image_idx[0]), gt_bev_map)
             ######################### For Ground Truth##########################
 
         list_score.append(scores)
 
         return list_score
+
     def total_segmentation_result(self, detections):
         avg_accuracy=[]
         avg_class_iou =[]
+        avg_precision=[]
         for det in detections:
             avg_accuracy.append(det['accuracy'])
             avg_class_iou.append(det['class_iou'])
+            avg_precision.append(det['precision'])
 
         avg_accuracy = np.sum(np.array(avg_accuracy)) / np.sum((np.array(avg_accuracy)!=0)) #divided by none zero no Cars
         avg_class_iou = np.sum(np.array(avg_class_iou)) / np.sum((np.array(avg_class_iou)!=0))  #divided by none zero no Cars
+        avg_precision = np.sum(np.array(avg_precision)) / np.sum((np.array(avg_precision)!=0))  #divided by none zero no Cars
 
+        result_dict = {}
+        result_dict['results'] ={"summary": '   Accuracy: {:.3f} \n'.format(avg_accuracy) + \
+                                '   Car IoU: {:.3f} \n'.format(avg_class_iou) + \
+                                '   Prevision: {:.3f} \n'.format(avg_precision)}
+        result_dict['detail'] = {"accuracy": avg_accuracy, "iou": avg_class_iou,
+                                        "precision": avg_precision}
         print('-------------------- Summary --------------------')
-        print('   Accuracy: {:.3f}'.format(avg_accuracy))
+        print('   Accuracy: {:.3f} '.format(avg_accuracy))
         print('   Car IoU: {:.3f}'.format(avg_class_iou))
-
+        print('   precision: {:.3f}'.format(avg_precision))
+        return result_dict
         ########################save Log #######################################
-        log_path = self.model_dir+'/log.txt'
-        logf = open(log_path, 'a')
-        logf.write("\n")
-        print('-------------------- Summary --------------------',file=logf)
-        print('   Accuracy: {:.3f}'.format(avg_accuracy), file=logf)
-        print('   Car IoU: {:.3f}'.format(avg_class_iou), file=logf)
+        # log_path = self.model_dir+'/log.txt'
+        # logf = open(log_path, 'a')
+        # logf.write("\n")
+        # print('-------------------- Summary --------------------',file=logf)
+        # print('   Accuracy: {:.3f}'.format(avg_accuracy), file=logf)
+        # print('   Car IoU: {:.3f}'.format(avg_class_iou), file=logf)
+
+def build_network(model_cfg, measure_time=False):
+    voxel_generator = voxel_builder.build(model_cfg.voxel_generator)
+    bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
+    box_coder = box_coder_builder.build(model_cfg.box_coder)
+    target_assigner_cfg = model_cfg.target_assigner
+    target_assigner = target_assigner_builder.build(target_assigner_cfg,
+                                                    bv_range, box_coder)
+    # box_coder.custom_ndim = target_assigner._anchor_generators[0].custom_ndim
+    return voxel_generator, target_assigner
+
+def _worker_init_fn(worker_id):
+    time_seed = np.array(time.time(), dtype=np.int32)
+    np.random.seed(time_seed + worker_id)
+    print(f"WORKER {worker_id} seed:", np.random.get_state()[1][0])
+
+def load_config(model_dir, config_path):
+    model_dir = str(Path(model_dir).resolve())
+    model_dir = Path(model_dir)
+    config_file_bkp = "pipeline.config"
+    if isinstance(config_path, str):
+        # directly provide a config object. this usually used
+        # when you want to train with several different parameters in
+        # one script.
+        config = pipeline_pb2.TrainEvalPipelineConfig()
+        with open(config_path, "r") as f:
+            proto_str = f.read()
+            text_format.Merge(proto_str, config)
+    else:
+        config = config_path
+        proto_str = text_format.MessageToString(config, indent=2)
+    with (model_dir / config_file_bkp).open("w") as f:
+        f.write(proto_str)
+
+    input_cfg = config.train_input_reader
+    eval_input_cfg = config.eval_input_reader
+    model_cfg = config.model.second
+    train_cfg = config.train_config
+    return (input_cfg, eval_input_cfg, model_cfg, train_cfg)
+
+def log_function(model_dir, config_path):
+    model_logging = SimpleModelLog(model_dir)
+    model_logging.open()
+
+    config = pipeline_pb2.TrainEvalPipelineConfig()
+    with open(config_path, "r") as f:
+        proto_str = f.read()
+        text_format.Merge(proto_str, config)
+
+    model_logging.log_text(proto_str + "\n", 0, tag="config")
+    return model_logging
+
+def load_dataloader(eval_input_cfg, model_cfg, voxel_generator, target_assigner, args):
+    eval_dataset = input_reader_builder.build(
+        eval_input_cfg,
+        model_cfg,
+        training=False,
+        voxel_generator=voxel_generator,
+        target_assigner=target_assigner,
+        segmentation=args["segmentation"],
+        bcl_keep_voxels=args["bcl_keep_voxels_eval"],
+        seg_keep_points=args["seg_keep_points_eval"]
+        ) #True FOR Pillar, False For BCL
+
+    eval_dataloader = torch.utils.data.DataLoader(
+        eval_dataset,
+        batch_size=eval_input_cfg.batch_size, # only support multi-gpu train
+        shuffle=False,
+        num_workers=eval_input_cfg.preprocess.num_workers,
+        pin_memory=False,
+        collate_fn=merge_second_batch)
+
+    return eval_dataloader, eval_dataset
+
+def example_convert_to_torch(example, dtype=torch.float32,
+                             device=None) -> dict:
+    device = device or torch.device("cuda:0")
+    example_torch = {}
+    float_names = [
+        "voxels", "anchors", "reg_targets", "reg_weights", "bev_map", "importance"
+    ]
+    for k, v in example.items():
+        if k in float_names:
+            # slow when directly provide fp32 data with dtype=torch.half
+            example_torch[k] = torch.tensor(
+                v, dtype=torch.float32, device=device).to(dtype)
+        elif k in ["coordinates", "labels", "num_points"]:
+            example_torch[k] = torch.tensor(
+                v, dtype=torch.int32, device=device)
+        elif k in ["anchors_mask"]:
+            example_torch[k] = torch.tensor(
+                v, dtype=torch.uint8, device=device)
+        elif k == "calib":
+            calib = {}
+            for k1, v1 in v.items():
+                calib[k1] = torch.tensor(
+                    v1, dtype=dtype, device=device).to(dtype)
+            example_torch[k] = calib
+        elif k == "num_voxels":
+            example_torch[k] = torch.tensor(v)
+        elif k in ["box_preds", "cls_preds"]:
+            example_torch[k] = torch.tensor(
+                v, dtype=torch.float32, device=device).to(dtype)
+        else:
+            example_torch[k] = v
+    return example_torch

@@ -57,8 +57,8 @@ def bcl_bn_relu(n, name, top_prev, top_lat_feats, nout, lattic_scale=None, loop=
             _top_lat_feats = n[str(name)+"_scale_"+str(idx)]
 
 
-        # bltr_weight_filler = dict(type='gaussian', std=float(0.001))
-        bltr_weight_filler = dict(type = 'xavier')
+        bltr_weight_filler = dict(type='gaussian', std=float(0.001))
+        # bltr_weight_filler = dict(type = 'xavier')
         n[str(name)+"_"+str(idx)] = L.Permutohedral(top_prev, _top_lat_feats, _top_lat_feats,
                                                         ntop=1,
                                                         permutohedral_param=dict(
@@ -99,9 +99,10 @@ def segmentation(n, seg_points, label, phase):
 
     top_prev, top_lattice= L.Python(seg_points, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshape'))
 
-    top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 64],
-                          lattic_scale=["0*16_1*16_2*16","0*8_1*8_2*8","0*4_1*4_2*4","0*2_1*2_2*2"], loop=4, skip='concat')
+    top_prev = conv_bn_relu(n, "conv0_seg", top_prev, 1, 64, stride=1, pad=0, loop=1)
 
+    top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 64],
+                          lattic_scale=["0*8_1*8_2*8","0*4_1*4_2*4","0*2_1*2_2*2","0_1_2"], loop=4, skip='concat')
 
     top_prev = conv_bn_relu(n, "conv1_seg", top_prev, 1, 64, stride=1, pad=0, loop=1)
 
@@ -118,26 +119,27 @@ def segmentation(n, seg_points, label, phase):
     if phase == "train":
         seg_preds = L.Permute(n.seg_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=1,H,W) -> (B,H,W,C=1)
         seg_preds = L.Reshape(seg_preds, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=1)-> (B, -1, 1)
-
-        seg_weights = L.Python(label, name = "SegWeight",
-                               python_param=dict(
-                                                module='bcl_layers',
-                                                layer='SegWeight'
-                                                ))
-
-        seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1])))
-
-        n.seg_loss= L.Python(seg_preds, label, seg_weights,
-                         name = "FocalLoss",
+        #
+        # seg_weights = L.Python(label, name = "SegWeight",
+        #                        python_param=dict(
+        #                                         module='bcl_layers',
+        #                                         layer='SegWeight'
+        #                                         ))
+        #
+        # seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1])))
+        n.seg_loss= L.Python(seg_preds, label,
+                         name = "Seg_Loss",
                          loss_weight = 1,
                          python_param=dict(
                          module='bcl_layers',
-                         layer='WeightFocalLoss'
+                         layer='FocalLoss'  #WeightFocalLoss, DiceFocalLoss, FocalLoss, DiceLoss
                          ),
                 param_str=str(dict(focusing_parameter=2, alpha=0.25)))
+                # param_str=str(dict(focusing_parameter=2, alpha=0.25, dice_belta=0.5, dice_alpha=0.5, lamda=0.1)))
+                # param_str=str(dict(alpha=0.5, belta=0.5))) #dice
 
-        #n.seg_loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
-        n.accuracy = L.Accuracy(n.seg_preds, label)
+        # n.seg_loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
+        # n.accuracy = L.Accuracy(n.seg_preds, label)
         output = n.seg_loss
     # Problem
     elif phase == "eval":
@@ -250,14 +252,13 @@ def seg_object_detection(phase,
 
         dataset_params_train = dataset_params.copy()
         dataset_params_train['subset'] = phase
-        dataset_params_train['anchors_cachae'] = False #False For BCL
-
         datalayer_train = L.Python(name='data', include=dict(phase=caffe.TRAIN),
-                                   ntop= 4, python_param=dict(module='bcl_layers', layer='InputKittiDataV2',
+                                   ntop= 2, python_param=dict(module='bcl_layers', layer='InputKittiData',
                                                      param_str=repr(dataset_params_train)))
-        seg_points, seg_labels, cls_labels, reg_targets = datalayer_train
+        seg_points, seg_labels = datalayer_train
 
     elif phase == "eval":
+        dataset_params_eval = dataset_params.copy()
         n['top_prev'] = L.Python(
                                 name = 'top_pre_input',
                                 ntop=1,
@@ -265,9 +266,11 @@ def seg_object_detection(phase,
                                 python_param=dict(
                                 module='bcl_layers',
                                 layer='DataFeature',
+                                param_str=repr(dataset_params_eval)
                                 ))
         top_prev = n['top_prev']
         seg_points = top_prev
+
 
         seg_labels = None
         cls_labels = None
@@ -279,7 +282,7 @@ def seg_object_detection(phase,
     if phase == "eval":
         car_points = output
 
-    n = object_detection(n, seg_points, cls_labels, reg_targets, phase)
+    #n = object_detection(n, seg_points, cls_labels, reg_targets, phase)
 
     print(n)
     return n.to_proto()

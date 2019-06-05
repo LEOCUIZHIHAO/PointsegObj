@@ -117,7 +117,7 @@ def Voxel3DStack2D(voxels, coors, num_points):
 
 def prepare_loss_weights(labels, dtype="float32"):
 
-    pos_cls_weight=1.0 
+    pos_cls_weight=1.0
     neg_cls_weight=1.0
 
     cared = labels >= 0
@@ -136,10 +136,10 @@ def prepare_loss_weights(labels, dtype="float32"):
 
     return cls_weights, reg_weights, cared
 
-generate_anchors_cachae = False #True FOR Pillar/Seocnd, False For BCL
+generate_anchors_cachae = True #True FOR Pillar/Seocnd, False For BCL
 phase = "train" #"eval", "train"
 model_dir = "experiment"
-config_path = "../../second/configs/car.fhd.config" #../../second/configs/poiltpillars/xyzer_16.config
+config_path = "../../second/configs/car.fhd_8.config" #"../../second/configs/leo.fhd.config" #../../second/configs/poiltpillars/xyzer_16.config #"../../second/configs/car.fhd.config"
 create_model_folder(model_dir, config_path)
 input_cfg, eval_input_cfg, model_cfg, train_cfg = load_config(model_dir, config_path)
 voxel_generator, target_assigner = build_network(model_cfg)
@@ -157,29 +157,21 @@ max_voxels = 12000
 voxels_arr = []
 
 for example in tqdm(dataloader):
-    seg_points = example['seg_points']
-    seg_labels = example['seg_labels']
-    reg_targets = example['reg_targets']
-    labels = example['labels']
-    
-    cls_weights, reg_weights, cared = prepare_loss_weights(labels)
-
-    #print("cls_weights", np.unique(cls_weights, return_counts=True))
-    #print("reg_weights", np.unique(reg_weights, return_counts=True))
-    #print("cared", np.unique(cared, return_counts=True))
-
+    voxels = example['voxels']
+    # num_points = example['num_points']
+    # coordinates = example['coordinates']
 ################################################################################
-#     voxels_arr.append(len(voxels))
-#     if len(voxels)<min:
-#         min = len(voxels)
-#         # ranking = np.argsort(num_points)[::-1]
-#         print("cur min ", min)
-#     if len(voxels)>max:
-#         max = len(voxels)
-#         # ranking = np.argsort(num_points)[::-1]
-#         print("cur max ", max)
-#
-# avg.append(len(voxels))
-# _avg = np.array(avg, dtype=int)
-# print("avg voxels num", np.mean(_avg))
+    voxels_arr.append(len(voxels))
+    if len(voxels)<min:
+        min = len(voxels)
+        # ranking = np.argsort(num_points)[::-1]
+        print("cur min ", min)
+    if len(voxels)>max:
+        max = len(voxels)
+        # ranking = np.argsort(num_points)[::-1]
+        print("cur max ", max)
+
+avg.append(len(voxels))
+_avg = np.array(avg, dtype=int)
+print("avg voxels num", np.mean(_avg))
 ################################################################################

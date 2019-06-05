@@ -78,10 +78,10 @@ def points_to_bev(points,
             format: xyzxyz, minmax
         with_reflectivity: bool. if True, will add a intensity map to bev map.
     Returns:
-        bev_map: [num_height_maps + 1(2), H, W] float tensor. 
-            `WARNING`: bev_map[-1] is num_points map, NOT density map, 
-            because calculate density map need more time in cpu rather than gpu. 
-            if with_reflectivity is True, bev_map[-2] is intensity map. 
+        bev_map: [num_height_maps + 1(2), H, W] float tensor.
+            `WARNING`: bev_map[-1] is num_points map, NOT density map,
+            because calculate density map need more time in cpu rather than gpu.
+            if with_reflectivity is True, bev_map[-2] is intensity map.
     """
     if not isinstance(voxel_size, np.ndarray):
         voxel_size = np.array(voxel_size, dtype=points.dtype)
@@ -204,7 +204,7 @@ def kitti_vis(points, boxes=None, labels=None, label_color=None):
     vis_point_range = [0, -40, -3, 70.4, 40, 1] #[0, -30, -3, 64, 30, 1]
     bev_map = point_to_vis_bev(points, vis_voxel_size, vis_point_range)
     if boxes is not None:
-        bev_map = draw_box_in_bev(bev_map, vis_point_range, boxes, [0, 255, 0], 2, labels, label_color)
+        bev_map = draw_box_in_bev(bev_map, vis_point_range, boxes, [0, 255, 0], 1, labels, label_color)
 
     return bev_map
 

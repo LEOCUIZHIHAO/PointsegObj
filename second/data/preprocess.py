@@ -20,23 +20,44 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 def SimpleVoxel(voxels, num_points):
-        points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1))
-        return points_mean
+    points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1)+1e-5) #zyxr if fixed container add 1e-5
+    # points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1))
+    return points_mean
 
-def VoxelRandomChoice(voxels, coors, num_points, max_voxels):
+def VoxelRandomChoice(voxels, coors, bcl_keep_voxels, num_point_features, max_num_points_per_voexl):
     voxel_num = len(voxels)
-    if voxel_num < max_voxels:
-        gap = max_voxels - voxel_num
-        voxel_idx = np.random.choice(voxel_num, size=gap, replace=True)
-        voxels = np.concatenate((voxels, voxels[voxel_idx]), axis=0)
-        coors = np.concatenate((coors, coors[voxel_idx]), axis=0)
-        num_points = np.concatenate((num_points, num_points[voxel_idx]), axis=0)
+    if voxel_num < bcl_keep_voxels:
+        gap = bcl_keep_voxels - voxel_num
+
+        # voxel_idx = np.random.choice(voxel_num, size=gap, replace=True)
+        # voxels = np.concatenate((voxels, voxels[voxel_idx]), axis=0)
+        # coors = np.concatenate((coors, coors[voxel_idx]), axis=0)
+        # num_points = np.concatenate((num_points, num_points[voxel_idx]), axis=0)
+        voxels_zero = np.zeros(shape=(gap, max_num_points_per_voexl, num_point_features)) #fill zero
+        coors_zero = np.zeros(shape=(gap, 3)) #fill zero
+        num_points_zero = np.zeros(shape=(gap,)) #fill zero
+        voxels = np.concatenate((voxels, voxels_zero), axis=0)
+        coors = np.concatenate((coors, coors_zero), axis=0)
+        # num_points = np.concatenate((num_points, num_points_zero), axis=0)
+
     else:
-        voxel_idx = np.random.choice(voxel_num, size=max_voxels, replace=False)
+        voxel_idx = np.random.choice(voxel_num, size=bcl_keep_voxels, replace=False)
         voxels = voxels[voxel_idx]
         coors = coors[voxel_idx]
-        num_points = num_points[voxel_idx]
-    return voxels, coors, num_points
+        # num_points = num_points[voxel_idx]
+
+    return voxels, coors#, num_points
+
+def PointRandomChoice(points, max_points):
+    points_num = len(points)
+    if points_num < max_points:
+        gap = max_points - points_num
+        points_idx = np.random.choice(points_num, size=gap, replace=True)
+        points = np.concatenate((points, points[points_idx]), axis=0)
+    else:
+        points_idx = np.random.choice(points_num, size=max_points, replace=False)
+        points = points[points_idx]
+    return points
 
 def Voxel3DStack2D(voxels, coors, num_points):
     coords_xy = np.delete(coors, obj=0, axis=1) #yx
@@ -56,41 +77,61 @@ def SampleNegAnchors(pos_anchors, neg_anchors, sample_size, num_anchor_per_loc):
 
     return anchors
 
-def PrepSegPoints(points_in_box, points_out_box, sample_size):
-
-    # points_in_box = Car
+def SamplePointsKeepALLPositive(points_in_box, points_out_box, sample_size, num_point_features):
     tot_points = len(points_out_box) + len(points_in_box)
-    if tot_points < sample_size:
+
+    #car point greater than sample points sample
+    if len(points_in_box) > sample_size:
+        pos_gap = int(sample_size/2)
+        neg_gap = sample_size - pos_gap
+        points_in_box_idx = np.random.choice(len(points_in_box), size=pos_gap, replace=False)
+        points_out_box_idx = np.random.choice(len(points_out_box), size=neg_gap, replace=True)
+        points_in_box = points_in_box[points_in_box_idx]
+        points_out_box = points_out_box[points_out_box_idx]
+    #total points less than sample then upsampling bg points
+    elif tot_points < sample_size:
         gap = sample_size - tot_points
-        choice = np.random.randint(0, len(points_out_box), gap)
-        _gap = points_out_box[choice,:]
+        _gap = np.zeros(shape=(gap, num_point_features)) #fill zero
         points_out_box = np.concatenate((points_out_box, _gap),axis=0)
-
+    #total points greater than sample then downsample bg points
     else:
-        out_sample = sample_size - len(points_in_box)
-        points_out_box = points_out_box[:out_sample]#downsample
+        down_sample = sample_size - len(points_in_box)
+        # points_out_box_idx = np.random.choice(len(points_out_box), size=down_sample, replace=False)
+        points_out_box_idx = np.random.randint(0, len(points_out_box), down_sample)
+        points_out_box= points_out_box[points_out_box_idx]
 
+    return points_in_box, points_out_box
+
+def SamplePoints(points, sample_size, num_point_features):
+    if len(points) < sample_size:
+        gap = sample_size - len(points)
+        _gap = np.zeros(shape=(gap, num_point_features)) #fill zero
+        points = np.concatenate((points, _gap),axis=0)
+    else:
+        choice = np.random.randint(0, len(points), sample_size)
+        points = points[choice,:]
+    return points
+
+def PrepDataAndLabel(points_in_box, points_out_box):
     points_in_label = np.ones(shape=(len(points_in_box),1), dtype=int)
     points_out_label = np.zeros(shape=(len(points_out_box),1), dtype=int)
 
     data = np.concatenate((points_in_box,points_out_box),axis=0)
     label = np.concatenate((points_in_label,points_out_label),axis=0)
-
     return data, label
 
-
-def FillRegWithNeg(seg_labels, bbox_targets, anchors_labels, points_sample_size, num_anchor_per_loc):
+def FillRegWithNeg(seg_labels, bbox_targets, anchors_labels, seg_keep_points, num_anchor_per_loc):
     bbox_targets_channel = bbox_targets.shape[-1]
 
     if len(seg_labels) > len(anchors_labels):
-        gap = len(seg_labels) - len(anchors_labels) + points_sample_size # gap + another 12000
+        gap = len(seg_labels) - len(anchors_labels) + seg_keep_points # gap + another 12000
         bbox_targets_fill = np.zeros(shape=(gap, bbox_targets_channel)) #fill with 0
         anchors_labels_fill = -1*np.ones(shape=(gap)) #label -1
         bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
         anchors_labels = np.concatenate((anchors_labels, anchors_labels_fill), axis=0)
 
     else:
-        gap = (points_sample_size * num_anchor_per_loc) - len(anchors_labels)
+        gap = (seg_keep_points * num_anchor_per_loc) - len(anchors_labels)
         bbox_targets_fill = np.zeros(shape=(gap, bbox_targets_channel)) #fill with 0
         anchors_labels_fill = -1 * np.ones(shape=(gap)) #label -1
         bbox_targets = np.concatenate((bbox_targets, bbox_targets_fill), axis=0)
@@ -176,7 +217,6 @@ def merge_second_batch_multigpu(batch_list):
 
     return ret
 
-
 def _dict_select(dict_, inds):
     for k, v in dict_.items():
         if isinstance(v, dict):
@@ -219,21 +259,22 @@ def prep_pointcloud(input_dict,
                     random_flip_y=True,
                     sample_importance=1.0,
                     out_dtype=np.float32,
-                    keep_voxels=12000,
-                    points_sample_size=16000,
+                    bcl_keep_voxels=6500, #6000~8000 pillar
+                    seg_keep_points=8000,
                     num_anchor_per_loc=2,
-                    seg_eval=False):
+                    segmentation=False,
+                    object_detection=True):
     """convert point cloud to voxels, create targets if ground truths
     exists.
 
     input_dict format: dataset.get_sensor_data format
 
     """
-    t = time.time()
+
     class_names = target_assigner.classes
     points = input_dict["lidar"]["points"]
 
-    if training or seg_eval:
+    if training or segmentation:
         anno_dict = input_dict["lidar"]["annotations"]
         gt_dict = {
             "gt_boxes": anno_dict["boxes"],
@@ -247,6 +288,7 @@ def prep_pointcloud(input_dict,
             gt_dict["difficulty"] = difficulty
         else:
             gt_dict["difficulty"] = anno_dict["difficulty"]
+
         if use_group_id and "group_ids" in anno_dict:
             group_ids = anno_dict["group_ids"]
             gt_dict["group_ids"] = group_ids
@@ -265,7 +307,6 @@ def prep_pointcloud(input_dict,
         surfaces = box_np_ops.corner_to_surfaces_3d_jit(frustums)
         masks = points_in_convex_polygon_3d_jit(points, surfaces)
         points = points[masks.any(-1)]
-
     if remove_outside_points:
         assert calib is not None
         image_shape = input_dict["image"]["image_shape"]
@@ -276,10 +317,34 @@ def prep_pointcloud(input_dict,
         _dict_select(gt_dict, selected)
         masks = box_np_ops.points_in_rbbox(points, gt_dict["gt_boxes"])
         points = points[masks.any(-1)]
-    metrics = {}
 
-    if training or seg_eval:
+    if not training and segmentation:
+        #Keep Car Only
+        gt_boxes_mask = np.array(
+            [n in class_names for n in gt_dict["gt_names"]], dtype=np.bool_)
+        _dict_select(gt_dict, gt_boxes_mask)
 
+        # ######################### For Ground Truth##########################
+        # with open("./visualization/3d_visual_eval/gt_boxes.pkl", 'ab') as f:
+        #     pickle.dump(gt_dict["gt_boxes"],f)
+        # with open("./visualization/3d_visual_eval/points.pkl", 'ab') as f:
+        #     pickle.dump(points,f)
+        # ######################### For Ground Truth##########################
+
+        points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
+        points_in_box, points_out_box = SamplePointsKeepALLPositive(points_in_box, points_out_box, seg_keep_points, num_point_features) #fixed 18888 points
+        data, label = PrepDataAndLabel(points_in_box, points_out_box)
+
+        example = {
+        'seg_points': data,
+        'seg_labels': label,
+        'gt_boxes' : gt_dict["gt_boxes"],
+        'image_idx' : input_dict['metadata']['image_idx'],
+        }
+
+        return example
+
+    if training:
         boxes_lidar = gt_dict["gt_boxes"]
         selected = kitti.drop_arrays_by_name(gt_dict["gt_names"], ["DontCare"])
         _dict_select(gt_dict, selected)
@@ -346,105 +411,77 @@ def prep_pointcloud(input_dict,
         if "group_ids" in gt_dict:
             group_ids = gt_dict["group_ids"]
 
-        if training:
-            prep.noise_per_object_v3_(
-                gt_dict["gt_boxes"],
-                points,
-                gt_boxes_mask,
-                rotation_perturb=gt_rotation_noise,
-                center_noise_std=gt_loc_noise_std,
-                global_random_rot_range=global_random_rot_range,
-                group_ids=group_ids,
-                num_try=100)
+        prep.noise_per_object_v3_(
+            gt_dict["gt_boxes"],
+            points,
+            gt_boxes_mask,
+            rotation_perturb=gt_rotation_noise,
+            center_noise_std=gt_loc_noise_std,
+            global_random_rot_range=global_random_rot_range,
+            group_ids=group_ids,
+            num_try=100)
 
-            # should remove unrelated objects after noise per object
-            # for k, v in gt_dict.items():
-            #     print(k, v.shape)
-            _dict_select(gt_dict, gt_boxes_mask)
-            gt_classes = np.array(
-                [class_names.index(n) + 1 for n in gt_dict["gt_names"]],
-                dtype=np.int32)
-            gt_dict["gt_classes"] = gt_classes
-            gt_dict["gt_boxes"], points = prep.random_flip(gt_dict["gt_boxes"],
-                                                       points, 0.5, random_flip_x, random_flip_y)
-            gt_dict["gt_boxes"], points = prep.global_rotation_v2(
-                gt_dict["gt_boxes"], points, *global_rotation_noise)
-            gt_dict["gt_boxes"], points = prep.global_scaling_v2(
-                gt_dict["gt_boxes"], points, *global_scaling_noise)
-            prep.global_translate_(gt_dict["gt_boxes"], points, global_translate_noise_std)
+        # should remove unrelated objects after noise per object
+        # for k, v in gt_dict.items():
+        #     print(k, v.shape)
+        _dict_select(gt_dict, gt_boxes_mask)
+        gt_classes = np.array(
+            [class_names.index(n) + 1 for n in gt_dict["gt_names"]],
+            dtype=np.int32)
+        gt_dict["gt_classes"] = gt_classes
+        gt_dict["gt_boxes"], points = prep.random_flip(gt_dict["gt_boxes"],
+                                                   points, 0.5, random_flip_x, random_flip_y)
+        gt_dict["gt_boxes"], points = prep.global_rotation_v2(
+            gt_dict["gt_boxes"], points, *global_rotation_noise)
+        gt_dict["gt_boxes"], points = prep.global_scaling_v2(
+            gt_dict["gt_boxes"], points, *global_scaling_noise)
+        prep.global_translate_(gt_dict["gt_boxes"], points, global_translate_noise_std)
 
-            bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
-            mask = prep.filter_gt_box_outside_range_by_center(gt_dict["gt_boxes"], bv_range)
-            _dict_select(gt_dict, mask)
+        bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
+        mask = prep.filter_gt_box_outside_range_by_center(gt_dict["gt_boxes"], bv_range)
+        _dict_select(gt_dict, mask)
 
         # limit rad to [-pi, pi]
         gt_dict["gt_boxes"][:, 6] = box_np_ops.limit_period(
             gt_dict["gt_boxes"][:, 6], offset=0.5, period=2 * np.pi)
 
-        if seg_eval:
-            points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
-            data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
-
-            example = {
-            'seg_points': data,
-            'seg_labels': label,
-            'gt_boxes' : gt_dict["gt_boxes"],
-            'image_idx' : input_dict['metadata']['image_idx'],
-            }
-            return example
-
+        ################################Visualaiziton###########################
         """
         # save bv ground truth cars
         boxes_lidar = gt_dict["gt_boxes"]
         bev_map = simplevis.kitti_vis(points, boxes_lidar)
-        #cv2.imwrite('./bev_car_prep/bev_map{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+        cv2.imwrite('./bev_car_prep/bev_map{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
         """
+        ########################################################################
 
     if shuffle_points:
-        # shuffle is a little slow.
-        np.random.shuffle(points)
+        np.random.shuffle(points) # shuffle is a little slow.
 
-    if training:
+    ################################Car point segmentation#####################
+    if training and segmentation:
+        #enlarge bouding box
+        enlarge_size = 0.5
+        gt_dict["gt_boxes"][:, 3:6] = gt_dict["gt_boxes"][:, 3:6] + enlarge_size #xyzhwlr
+        points = SamplePoints(points, seg_keep_points, num_point_features) #EVEN sample
         points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
-        data, label = PrepSegPoints(points_in_box, points_out_box, points_sample_size)
+        data, label = PrepDataAndLabel(points_in_box, points_out_box)
+        ################################Visualaiziton###########################
+        # boxes_lidar = gt_dict["gt_boxes"]
+        # bev_map = simplevis.kitti_vis(points, boxes_lidar)
+        # cv2.imwrite('./bev_car_prep/large_bev_map{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
 
         example = {
         'seg_points': data,
         'seg_labels': label,
         }
 
-    if not training:
-        if len(points) > points_sample_size:
-            num_points = len(points)
-            num_points = np.random.choice(num_points, size=points_sample_size, replace=False) #not repeat sampling
-            points = points[num_points]
-            example = {
-            'seg_points': points
-            }
-        else:
-            num_points = len(points)
-            num_points = np.random.choice(num_points, size=points_sample_size, replace=True) #repeat sampling
-            points = points[num_points]
-            example = {
-            'seg_points': points
-            }
+        return example
 
-    """
-    # check car points
-    boxes_lidar = gt_dict["gt_boxes"]
-    bev_map = simplevis.kitti_vis(data, boxes_lidar)
-    #cv2.imwrite('./car_points/car_points{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
-    """
-
-    #voxel_generator
-    """
-    # [0, -40, -3, 70.4, 40, 1]
-    voxel_size = voxel_generator.voxel_size
+    #################################voxel_generator############################
+    voxel_size = voxel_generator.voxel_size # [0, -40, -3, 70.4, 40, 1]
     pc_range = voxel_generator.point_cloud_range
-    grid_size = voxel_generator.grid_size
-    # [352, 400]
-    t1 = time.time()
-
+    grid_size = voxel_generator.grid_size # [352, 400]
+    max_num_points_per_voxel = voxel_generator.max_num_points_per_voxel
 
     if not multi_gpu:
         res = voxel_generator.generate(
@@ -460,16 +497,23 @@ def prep_pointcloud(input_dict,
         coordinates = res["coordinates"]
         num_points = res["num_points_per_voxel"]
         num_voxels = np.array([res["voxel_num"]], dtype=np.int64)
-    metrics["voxel_gene_time"] = time.time() - t1
 
     example = {
         'voxels': voxels,
-        'num_points': num_points,
+        #'num_points': num_points,
         'coordinates': coordinates,
         "num_voxels": num_voxels,
-        "metrics": metrics,
     }
-    """
+
+
+    ## WARNING:  For Simplex voxel Testing if bug comment this
+    # voxels= SimpleVoxel(voxels, num_points) #(V,100,C) -> (B, C, V, N)
+    voxels, coordinates = VoxelRandomChoice(voxels, coordinates,
+                                        bcl_keep_voxels, num_point_features,
+                                        max_num_points_per_voexl=max_num_points_per_voxel)
+
+    example['voxels']=voxels
+    example['coordinates']=coordinates
 
 
     if calib is not None:
@@ -483,15 +527,14 @@ def prep_pointcloud(input_dict,
         unmatched_thresholds = anchor_cache["unmatched_thresholds"]
 
     else:
-
         # generate anchors from ground truth
         """
         voxels= SimpleVoxel(voxels, num_points) #(V,100,C) -> (B, C, V, N)
-        voxels, coordinates, num_points = VoxelRandomChoice(voxels, coordinates, num_points, keep_voxels)
+        voxels, coordinates, num_points = VoxelRandomChoice(voxels, coordinates, num_points, bcl_keep_voxels)
         example['voxels']=voxels
         example['num_points']=num_points
         example['coordinates']=coordinates
-        example['num_voxels']=keep_voxels
+        example['num_voxels']=bcl_keep_voxels
 
         if training:
             # for anchor free
@@ -542,6 +585,9 @@ def prep_pointcloud(input_dict,
             for k in anchors_dict[order_k].keys():
                 anchors_dict[order_k][k] = np.concatenate((anchors_dict[order_k][k], anchors_dict_gt[order_k][k]))
         """
+
+        # generate anchors from groundtruth
+        """
         if training:
             # generate anchors from car points
             points_in_box = points_in_box[:,:3] #xyz
@@ -555,13 +601,9 @@ def prep_pointcloud(input_dict,
                 anchors[:, [0, 1, 3, 4, 6]])
             matched_thresholds = ret["matched_thresholds"]
             unmatched_thresholds = ret["unmatched_thresholds"]
+        """
 
-
-    #Warning If use anchro free move outside !
-    if training:
-        example["anchors"] = anchors
-
-
+    example["anchors"] = anchors
     anchors_mask = None
     if anchor_area_threshold >= 0:
         # slow with high resolution. recommend disable this forever.
@@ -575,9 +617,18 @@ def prep_pointcloud(input_dict,
         anchors_mask = anchors_area > anchor_area_threshold
         # example['anchors_mask'] = anchors_mask.astype(np.uint8)
         example['anchors_mask'] = anchors_mask
-    metrics["prep_time"] = time.time() - t
+
     if not training:
+        # Use it when debuging eval nms for good
+        eval_classes = input_dict["lidar"]["annotations"]["names"]
+        eval_gt_dict = {"gt_names" : eval_classes}
+        gt_boxes_mask = np.array(
+            [n in class_names for n in eval_classes], dtype=np.bool_)
+        _dict_select(eval_gt_dict, gt_boxes_mask)
+        example["gt_num"]= len(eval_gt_dict["gt_names"]) #how many objects in eval GT
+
         return example
+
     example["gt_names"] = gt_dict["gt_names"]
     # voxel_labels = box_np_ops.assign_label_to_voxel(gt_boxes, coordinates,
     #                                                 voxel_size, coors_range)
@@ -591,8 +642,8 @@ def prep_pointcloud(input_dict,
     # cv2.imshow('anchors', bev_map)
     # cv2.waitKey(0)
     """
+
     if create_targets:
-        t1 = time.time()
         targets_dict = target_assigner.assign(
             anchors,
             anchors_dict, #this is the key to control the number of anchors (input anchors) ['anchors, unmatch,match']
@@ -604,18 +655,19 @@ def prep_pointcloud(input_dict,
             unmatched_thresholds=unmatched_thresholds,
             importance=gt_dict["gt_importance"])
 
-
-        # bev anchors with points
-        #boxes_lidar = gt_dict["gt_boxes"]
-        #bev_map = simplevis.kitti_vis(points, boxes_lidar, gt_dict["gt_names"])
-        #assigned_anchors = anchors[targets_dict['labels'] > 0]
-        #ignored_anchors = anchors[targets_dict['labels'] == -1]
-        #bev_map = simplevis.draw_box_in_bev(bev_map, [0, -40, -3, 70.4, 40, 1], ignored_anchors, [128, 128, 128], 2) #ignored_anchors gray    #[0, -30, -3, 64, 30, 1] for kitti
-        #bev_map = simplevis.draw_box_in_bev(bev_map, [0, -40, -3, 70.4, 40, 1], assigned_anchors, [255, 0, 0]) #assigned_anchors blue
-        #cv2.imwrite('anchors/anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
-        # cv2.imshow('anchors', bev_map)
-        # cv2.waitKey(0)
-
+        ################################Visualaiziton###########################
+        """
+        bev anchors with points
+        boxes_lidar = gt_dict["gt_boxes"]
+        bev_map = simplevis.kitti_vis(points, boxes_lidar, gt_dict["gt_names"])
+        assigned_anchors = anchors[targets_dict['labels'] > 0]
+        ignored_anchors = anchors[targets_dict['labels'] == -1]
+        bev_map = simplevis.draw_box_in_bev(bev_map, [0, -40, -3, 70.4, 40, 1], ignored_anchors, [128, 128, 128], 2) #ignored_anchors gray    #[0, -30, -3, 64, 30, 1] for kitti
+        bev_map = simplevis.draw_box_in_bev(bev_map, [0, -40, -3, 70.4, 40, 1], assigned_anchors, [255, 0, 0]) #assigned_anchors blue
+        cv2.imwrite('anchors/anchors_{}.png'.format(input_dict['metadata']['image_idx']),bev_map)
+        cv2.imshow('anchors', bev_map)
+        cv2.waitKey(0)
+        """
 
         """
         # bev boxes_lidar with voxels (put z in to the plane)
@@ -637,28 +689,30 @@ def prep_pointcloud(input_dict,
         # cv2.imshow('heights', pp_map)
         # cv2.waitKey(0)
         """
-        if anchor_cache is None:
-            #fill box_Target with -1
-            anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], points_sample_size, num_anchor_per_loc)
-            targets_dict['bbox_targets'] = anchors_bbox
-            targets_dict['labels'] = anchors_labels
+        ########################################################################
+        # if anchor_cache is None:
+        #     #fill box_Target with -1
+        #     anchors_bbox, anchors_labels = FillRegWithNeg(data, targets_dict['bbox_targets'], targets_dict['labels'], seg_keep_points, num_anchor_per_loc)
+        #     targets_dict['bbox_targets'] = anchors_bbox
+        #     targets_dict['labels'] = anchors_labels
 
         # pos_anchors_idx = targets_dict['labels'] > 0
         # neg_anchors_idx = targets_dict['labels'] == 0
         # pos_anchors = anchors[pos_anchors_idx]
         # neg_anchors = anchors[neg_anchors_idx]
         #
-        # anchors = SampleNegAnchors(pos_anchors, neg_anchors, points_sample_size, num_anchor_per_loc)
+        # anchors = SampleNegAnchors(pos_anchors, neg_anchors, seg_keep_points, num_anchor_per_loc)
         #
         # pos_targets_label = targets_dict['labels'][pos_anchors_idx]
         # neg_targets_label = targets_dict['labels'][neg_anchors_idx]
         # labels = np.concatenate((pos_targets_label, neg_targets_label),axis=0)
+        # points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, pos_anchors) #xyzr
 
         example.update({
             'labels': targets_dict['labels'], # if anchors free the 0 is the horizontal/vertical anchors
             'reg_targets': targets_dict['bbox_targets'], # target assign get offsite
-            # 'reg_weights': targets_dict['bbox_outside_weights'],
             'importance': targets_dict['importance'],
+            # 'reg_weights': targets_dict['bbox_outside_weights'],
         })
 
     return example

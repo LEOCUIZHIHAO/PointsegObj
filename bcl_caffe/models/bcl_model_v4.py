@@ -42,13 +42,15 @@ def deconv_bn_relu(n, name, top_prev, ks, nout, stride=1, pad=0):
 
     return top_prev
 
-def bcl_bn_relu(n, name, top_prev, top_lat_feats, nout, lattic_scale=None, loop=1):
+def bcl_bn_relu(n, name, top_prev, top_lat_feats, nout, lattic_scale=None, loop=1, skip=None):
+
+    if skip=='concat':
+        skip_params= []
 
     for idx in range(loop):
 
         if lattic_scale:
 
-            # if use python mode ["0*16_1*16_2*16", "0*8_1*8_2*8", "0*2_1*2_2*2"]
             n[str(name)+"_scale_"+str(idx)] = L.Python(top_lat_feats, python_param=dict(module='bcl_layers',
                                                                     layer='PickAndScale',
                                                                     param_str=lattic_scale[idx]))
@@ -80,6 +82,13 @@ def bcl_bn_relu(n, name, top_prev, top_lat_feats, nout, lattic_scale=None, loop=
         n[str(name)+'_relu_'+str(idx)] = L.ReLU(top_prev, in_place=True)
         top_prev = n[str(name)+'_relu_'+str(idx)]
 
+        if skip=='concat':
+            skip_params.append(n[str(name)+'_relu_'+str(idx)])
+
+    if skip=='concat':
+        n['concat'] = L.Concat(*skip_params)
+        top_prev = n['concat']
+
     return top_prev
 
 def bilateral_baseline(phase,
@@ -90,30 +99,26 @@ def bilateral_baseline(phase,
             save_path=None,
             ):
 
-    """
+
     #RPN pillar config
     num_filters = [64,128,256]
     layer_strides = [2,2,2]
     layer_nums = [3,5,5]
     upsample_strides = [1, 2, 4]
     num_upsample_filters = [128, 128, 128]
-    anchors_fp_w = 432 #1408
-    anchors_fp_h = 496 #1600
-    f_map_h = int(anchors_fp_h/2)
-    f_map_w = int(anchors_fp_w/2)
-    """
+    anchors_fp_w = 704 #1408
+    anchors_fp_h = 800 #1600
 
+    """
     #RPN second config
-    num_filters = [128]
-    layer_strides = [1]
-    layer_nums = [5]
+    num_filters = [64]
+    layer_strides = [2]
+    layer_nums = [1]
     upsample_strides = [1]
-    num_upsample_filters = [128]
-    anchors_fp_w = 1408 #1408 176
-    anchors_fp_h = 1600 #1600 200
-    keep_voxels =12000
-    f_map_h = 1 #int(anchors_fp_h/2)
-    f_map_w = keep_voxels #int(anchors_fp_w/2)
+    num_upsample_filters = [64]
+    anchors_fp_w = 704  #1408 176
+    anchors_fp_h = 800  #1600 200
+    """
 
     box_code_size = 7
     num_anchor_per_loc = 2
@@ -125,15 +130,15 @@ def bilateral_baseline(phase,
 
         dataset_params_train = dataset_params.copy()
         dataset_params_train['subset'] = phase
-        dataset_params_train['anchors_cachae'] = False #True FOR Pillar, False For BCL
+        dataset_params_train['anchors_cachae'] = True #True FOR Pillar, False For BCL
 
         datalayer_train = L.Python(name='data', include=dict(phase=caffe.TRAIN),
-                                   ntop= 4, python_param=dict(module='bcl_layers', layer='InputKittiData',
+                                   ntop= 4, python_param=dict(module='bcl_layers', layer='InputKittiDataV3',
                                                      param_str=repr(dataset_params_train)))
 
         n.data, n.coors, n.labels, n.reg_targets = datalayer_train
         top_prev = n.data
-        coords_feature = n.coors
+        coords = n.coors
 
     elif phase == "eval":
         n['top_prev'] = L.Python(
@@ -153,14 +158,36 @@ def bilateral_baseline(phase,
                                 module='bcl_layers',
                                 layer='LatticeFeature',
                                 ))
-        coords_feature = n['top_lat_feats']
+        coords = n['top_lat_feats']
 
-    top_lat_feats= L.Python(coords_feature, ntop=1, python_param=dict(module='bcl_layers',layer='BCLReshape'))
-    # 3D BCL
-    top_prev = bcl_bn_relu(n, 'bcl', top_prev, top_lat_feats, nout=[64, 128, 128, 64],
-                          lattic_scale=["0*4_1*4_2*4","0*2_1*2_2*2", "0_1_2","0/2_1/2_2/2"], loop=4)
+    # top_prev, lat_feats = L.Python(top_prev, coords, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshapeV3'))
+    top_prev, lat_feats = L.Python(top_prev, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshape'))
 
-    top_prev = conv_bn_relu(n, "ini_conv1", top_prev, 1, 64, stride=1, pad=0, loop=1)
+    top_prev = bcl_bn_relu(n, 'bcl', top_prev, lat_feats, nout=[64, 128, 128, 64],
+                          lattic_scale=["0_1_2","0/2_1/2_2/2", "0/4_1/4_2/4","0/8_1/8_2/8"], loop=4, skip='concat')
+    # top_prev = bcl_bn_relu(n, 'bcl', top_prev, lat_feats, nout=[64, 128, 128, 64],
+    #                       lattic_scale=["0*2_1*2","0_1", "0/2_1/2","0/4_1/4"], loop=4, skip='concat')
+
+    top_prev = conv_bn_relu(n, "conv1", top_prev, 1, 64, stride=1, pad=0, loop=1)
+
+    top_prev = L.Python(top_prev, coords, ntop=1,python_param=dict(
+                            module='bcl_layers',
+                            layer='Scatter',
+                            param_str=str(dict(output_shape=[anchors_fp_h, anchors_fp_w, 64]))))
+
+    top_prev = conv_bn_relu(n, "ini_conv1", top_prev, 3, num_filters[0], stride=layer_strides[0], pad=1, loop=1)
+    top_prev = conv_bn_relu(n, "rpn_conv1", top_prev, 3, num_filters[0], stride=1, pad=1, loop=layer_nums[0]) #3
+    deconv1 = deconv_bn_relu(n, "rpn_deconv1", top_prev, upsample_strides[0], num_upsample_filters[0], stride=upsample_strides[0], pad=0)
+
+    top_prev = conv_bn_relu(n, "ini_conv2", top_prev, 3, num_filters[1], stride=layer_strides[1], pad=1, loop=1)
+    top_prev = conv_bn_relu(n, "rpn_conv2", top_prev, 3, num_filters[1], stride=1, pad=1, loop=layer_nums[1]) #5
+    deconv2 = deconv_bn_relu(n, "rpn_deconv2", top_prev, upsample_strides[1], num_upsample_filters[1], stride=upsample_strides[1], pad=0)
+
+    top_prev = conv_bn_relu(n, "ini_conv3", top_prev, 3, num_filters[2], stride=layer_strides[2], pad=1, loop=1)
+    top_prev = conv_bn_relu(n, "rpn_conv3", top_prev, 3, num_filters[2], stride=1, pad=1, loop=layer_nums[2]) #5
+    deconv3 = deconv_bn_relu(n, "rpn_deconv3", top_prev, upsample_strides[2], num_upsample_filters[2], stride=upsample_strides[2], pad=0)
+    n['rpn_out'] = L.Concat(deconv1, deconv2, deconv3)
+    top_prev = n['rpn_out']
 
     n.cls_preds = L.Convolution(top_prev, name = "cls_head",
                          convolution_param=dict(num_output=num_anchor_per_loc * num_cls,
@@ -182,24 +209,14 @@ def bilateral_baseline(phase,
                                                  ),
                           param=[dict(lr_mult=1), dict(lr_mult=1)])
 
-
     cls_preds = n.cls_preds
     box_preds = n.box_preds
-    # Jim comment
-    # NOTE: This works for second
-    # cls_preds_reshape = L.Reshape(cls_preds, reshape_param=dict(shape=dict(dim=[-1, num_anchor_per_loc, num_cls, f_map_h, f_map_w]))) #(B,C,H,W) -> (B,n_anchor,n_cls,H,W)
-    # cls_preds_permute = L.Permute(cls_preds_reshape, permute_param=dict(order=[0, 1, 3, 4, 2])) #(B,n_anchor,n_cls,H,W) -> (B,n_anchor,H,W,n_cls)
-    # cls_preds_reshape = L.Reshape(cls_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,n_anchor,H,W,n_cls) -> (B, -1, n_cls)
-    # box_preds_reshape = L.Reshape(box_preds, reshape_param=dict(shape=dict(dim=[-1, num_anchor_per_loc, box_code_size, f_map_h, f_map_w]))) #(B,C,H,W) -> (B,n_anchor,box_c_siz,H,W)
-    # box_preds_permute = L.Permute(box_preds_reshape, permute_param=dict(order=[0, 1, 3, 4, 2])) #(B,n_anchor,box_c_siz,H,W) -> (B,n_anchor,H,W,box_c_siz)
-    # box_preds_reshape = L.Reshape(box_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, box_code_size])))# (B,n_anchor,H,W,box_c_siz) -> (B, -1, box_c_siz)
 
     cls_preds_permute = L.Permute(cls_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=2,H,W) -> (B,H,W,C=2)
     cls_preds_reshape = L.Reshape(cls_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=2)-> (B, -1, 1)
 
     box_preds_permute = L.Permute(box_preds, permute_param=dict(order=[0, 2, 3, 1]))  #(B,C=2*7,H,W) -> (B,H,W,C=2*7)
     box_preds_reshape = L.Reshape(box_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, box_code_size])))# (B,H,W,C=2*7)-> (B, -1, 7)
-
 
     if phase == "eval":
         n.f_cls_preds = cls_preds_reshape
