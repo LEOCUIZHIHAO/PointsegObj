@@ -91,6 +91,7 @@ def bcl_bn_relu(n, name, top_prev, top_lat_feats, nout, lattic_scale=None, loop=
 
     return top_prev
 
+
 def segmentation(n, seg_points, label, phase):
     ############### Params ###############
     num_cls = 1
@@ -100,23 +101,9 @@ def segmentation(n, seg_points, label, phase):
 
     top_prev = conv_bn_relu(n, "conv0_seg", top_prev, 1, 64, stride=1, pad=0, loop=1)
 
-    """
-    1. If lattice scale too large the network will really slow and don't have good result
-    """
-    # #2nd
-    top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 64, 128, 128, 128, 64],
-                          lattic_scale=["0*4_1*4_2*4","0*2_1*2_2*2","0_1_2","0/2_1/2_2/2","0/4_1/4_2/4","0/8_1/8_2/8"], loop=6, skip='concat')
-    #
-    # #3rd
-    # top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 64],
-                          # lattic_scale=["0*8_1*8_2*8", "0*4_1*4_2*4", "0*2_1*2_2*2", "0_1_2"], loop=4, skip='concat')
+    top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 128, 64],
+                          lattic_scale=["0*2_1*2_2*2","0_1_2","0/2_1/2_2/2","0/4_1/4_2/4","0/8_1/8_2/8"], loop=5, skip='concat')
 
-    # BEST NOW
-    # top_prev = bcl_bn_relu(n, 'bcl_seg', top_prev, top_lattice, nout=[64, 128, 128, 128, 64],
-    #                       lattic_scale=["0*2_1*2_2*2","0_1_2","0/2_1/2_2/2","0/4_1/4_2/4","0/8_1/8_2/8"], loop=5, skip='concat')
-
-    # top_prev = conv_bn_relu(n, "conv0_seg", top_prev, 1, 256, stride=1, pad=0, loop=1)
-    # top_prev = conv_bn_relu(n, "conv0_seg", top_prev, 1, 128, stride=1, pad=0, loop=1)
     top_prev = conv_bn_relu(n, "conv1_seg", top_prev, 1, 64, stride=1, pad=0, loop=1)
 
     n.seg_preds = L.Convolution(top_prev, name = "car_seg",
@@ -132,7 +119,7 @@ def segmentation(n, seg_points, label, phase):
     if phase == "train":
         seg_preds = L.Permute(n.seg_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=1,H,W) -> (B,H,W,C=1)
         seg_preds = L.Reshape(seg_preds, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=1)-> (B, -1, 1)
-
+        #
         # seg_weights = L.Python(label, name = "SegWeight",
         #                        python_param=dict(
         #                                         module='bcl_layers',
@@ -140,34 +127,7 @@ def segmentation(n, seg_points, label, phase):
         #                                         ))
         #
         # seg_weights = L.Reshape(seg_weights, reshape_param=dict(shape=dict(dim=[0, -1])))
-
-        # sigmoid_seg_preds = L.Sigmoid(seg_preds)
-        #
-        # n.dice_loss = L.Python(sigmoid_seg_preds, label, #seg_weights,
-        #                  name = "Seg_Loss",
-        #                  loss_weight = 1,
-        #                  python_param=dict(
-        #                  module='bcl_layers',
-        #                  layer='DiceLoss'  #WeightFocalLoss, DiceFocalLoss, FocalLoss, DiceLoss
-        #                  ),
-        #         # param_str=str(dict(focusing_parameter=2, alpha=0.25)))
-        #         # param_str=str(dict(focusing_parameter=2, alpha=0.25, dice_belta=0.5, dice_alpha=0.5, lamda=0.1)))
-        #         param_str=str(dict(alpha=0.5, belta=0.5))) #dice #1, 1
-
-        # sigmoid_seg_preds = L.Sigmoid(seg_preds)
-        #
-        # n.dice_loss = L.Python(sigmoid_seg_preds, label, #seg_weights,
-        #                  name = "Seg_Loss",
-        #                  loss_weight = 1,
-        #                  python_param=dict(
-        #                  module='bcl_layers',
-        #                  layer='IoUSegLoss'  #WeightFocalLoss, DiceFocalLoss, FocalLoss, DiceLoss
-        #                  ))
-                # param_str=str(dict(focusing_parameter=2, alpha=0.25)))
-                # param_str=str(dict(focusing_parameter=2, alpha=0.25, dice_belta=0.5, dice_alpha=0.5, lamda=0.1)))
-                # param_str=str(dict(alpha=0.5, belta=0.5))) #dice #1, 1
-
-        n.seg_loss = L.Python(seg_preds, label, #seg_weights,
+        n.seg_loss= L.Python(seg_preds, label,
                          name = "Seg_Loss",
                          loss_weight = 1,
                          python_param=dict(
@@ -176,17 +136,139 @@ def segmentation(n, seg_points, label, phase):
                          ),
                 param_str=str(dict(focusing_parameter=2, alpha=0.25)))
                 # param_str=str(dict(focusing_parameter=2, alpha=0.25, dice_belta=0.5, dice_alpha=0.5, lamda=0.1)))
-                # param_str=str(dict(alpha=0.5, belta=0.5))) #dice #1, 1
+                # param_str=str(dict(alpha=0.5, belta=0.5))) #dice
 
-        # n.seg_loss = L.SigmoidCrossEntropyLoss(seg_preds, label)
+        # n.seg_loss = L.SigmoidCrossEntropyLoss(n.seg_preds, label)
         # n.accuracy = L.Accuracy(n.seg_preds, label)
-        output = None
+        output = n.seg_loss
     # Problem
     elif phase == "eval":
         n.output = L.Sigmoid(n.seg_preds)
         output = n.output
 
     return n, output
+
+def object_detection(n, voxels, coors, label, reg_targets, phase):
+    ############### Params ###############
+    box_code_size = 7
+    num_anchor_per_loc = 1
+    num_cls = 1
+    ############### Params ###############
+
+    top_prev, top_lattice= L.Python(voxels, coors, ntop=2, python_param=dict(module='bcl_layers',layer='BCLReshape'))
+
+    top_prev = conv_bn_relu(n, "conv0_obj", top_prev, 1, 64, stride=1, pad=0, loop=1)
+
+    top_prev = bcl_bn_relu(n, 'bcl_obj', top_prev, top_lattice, nout=[64, 64, 128, 128, 128, 64],
+                          lattic_scale=["0*32_1*32_2*32","0*16_1*16_2*16","0*8_1*8_2*8", "0*4_1*4_2*4","0*2_1*2_2*2", "0_1_2"], loop=6, skip='concat')
+
+    top_prev = conv_bn_relu(n, "conv1_obj", top_prev, 1, 64, stride=1, pad=0, loop=1)
+
+    n.cls_preds = L.Convolution(top_prev, name = "cls_head",
+                         convolution_param=dict(num_output=num_anchor_per_loc * num_cls,
+                                                kernel_size=1, stride=1, pad=0,
+                                                weight_filler=dict(type = 'xavier'),
+                                                bias_term = True,
+                                                bias_filler=dict(type='constant', value=0),
+                                                engine=1,
+                                                ),
+                         param=[dict(lr_mult=1), dict(lr_mult=1)])
+
+    n.box_preds = L.Convolution(top_prev, name = "reg_head",
+                          convolution_param=dict(num_output=num_anchor_per_loc * box_code_size,
+                                                 kernel_size=1, stride=1, pad=0,
+                                                 weight_filler=dict(type = 'xavier'),
+                                                 bias_term = True,
+                                                 bias_filler=dict(type='constant', value=0),
+                                                 engine=1,
+                                                 ),
+                          param=[dict(lr_mult=1), dict(lr_mult=1)])
+
+
+
+    cls_preds = n.cls_preds
+    box_preds = n.box_preds
+    box_preds = L.ReLU(box_preds, in_place=True) ## WARNING:  ReLU
+    # box_preds = L.Python(box_preds, name = "CaLu",
+    #                         python_param=dict(
+    #                                     module='bcl_layers',
+    #                                     layer='CaLuV2',
+    #                                     ))
+
+    cls_preds_permute = L.Permute(cls_preds, permute_param=dict(order=[0, 2, 3, 1])) #(B,C=2,H,W) -> (B,H,W,C=2)
+    cls_preds_reshape = L.Reshape(cls_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, num_cls])))# (B,H,W,C=2)-> (B, -1, 1)
+
+    box_preds_permute = L.Permute(box_preds, permute_param=dict(order=[0, 2, 3, 1]))  #(B,C=2*7,H,W) -> (B,H,W,C=2*7)
+    box_preds_reshape = L.Reshape(box_preds_permute, reshape_param=dict(shape=dict(dim=[0, -1, box_code_size])))# (B,H,W,C=2*7)-> (B, -1, 7)
+
+
+    if phase == "eval":
+        n.f_cls_preds = cls_preds_reshape
+        n.f_box_preds = box_preds_reshape
+
+    elif phase == "train":
+
+        # n['cared'],n['reg_outside_weights'], n['cls_weights']= L.Python(label,
+        #                                                                 name = "PrepareLossWeight",
+        #                                                                 ntop = 3,
+        #                                                                 python_param=dict(
+        #                                                                             module='bcl_layers',
+        #                                                                             layer='PrepareLossWeight'
+        #                                                                             ))
+        # reg_outside_weights, cared, cls_weights = n['reg_outside_weights'], n['cared'], n['cls_weights']
+
+        n['reg_outside_weights'], n['cls_weights']= L.Python(label,
+                                                            name = "PrepareLossWeightV2",
+                                                            ntop = 2,
+                                                            python_param=dict(
+                                                                        module='bcl_layers',
+                                                                        layer='PrepareLossWeightV2'
+                                                                        ))
+        reg_outside_weights, cls_weights = n['reg_outside_weights'], n['cls_weights']
+
+        # Gradients cannot be computed with respect to the label inputs (bottom[1])#
+        # n['labels_input'] = L.Python(label, cared,
+        #                     name = "Label_Encode",
+        #                     python_param=dict(
+        #                                 module='bcl_layers',
+        #                                 layer='LabelEncode',
+        #                                 ))
+        # labels_input = n['labels_input']
+        n['labels_input'] = L.Python(label,
+                            name = "LabelEncodeV2",
+                            python_param=dict(
+                                        module='bcl_layers',
+                                        layer='LabelEncodeV2',
+                                        ))
+        labels_input = n['labels_input']
+
+
+        n.cls_loss= L.Python(cls_preds_reshape, labels_input, cls_weights,
+                                name = "FocalLoss",
+                                loss_weight = 2,
+                                python_param=dict(
+                                            module='bcl_layers',
+                                            layer='WeightFocalLoss'
+                                            ),
+                                param_str=str(dict(focusing_parameter=2, alpha=0.25)))
+
+        n.reg_loss= L.Python(box_preds_reshape, reg_targets, reg_outside_weights, top_lattice,
+                                name = "WeightedSmoothL1Loss",
+                                loss_weight = 1,
+                                python_param=dict(
+                                            module='bcl_layers',
+                                            layer='WeightedSmoothL1Loss'
+                                            ))
+        # box_preds_reshape = L.ReLU(box_preds_reshape, in_place=True)
+        # n.reg_loss= L.Python(box_preds_reshape, reg_targets, labels_input, reg_outside_weights, top_lattice,
+        #                         name = "IoULossV2",
+        #                         loss_weight = 1,
+        #                         python_param=dict(
+        #                                     module='bcl_layers',
+        #                                     layer='IoULossV2'
+        #                                     ))
+
+    return n
 
 def seg_object_detection(phase,
             dataset_params=None,
@@ -203,9 +285,9 @@ def seg_object_detection(phase,
         dataset_params_train = dataset_params.copy()
         dataset_params_train['subset'] = phase
         datalayer_train = L.Python(name='data', include=dict(phase=caffe.TRAIN),
-                                   ntop= 2, python_param=dict(module='bcl_layers', layer='InputKittiData',
+                                   ntop= 4, python_param=dict(module='bcl_layers', layer='InputKittiDataV2',
                                                      param_str=repr(dataset_params_train)))
-        seg_points, seg_labels = datalayer_train
+        voxels, coors, cls_labels, reg_targets = datalayer_train
 
     elif phase == "eval":
         dataset_params_eval = dataset_params.copy()
@@ -218,19 +300,30 @@ def seg_object_detection(phase,
                                 layer='DataFeature',
                                 param_str=repr(dataset_params_eval)
                                 ))
-        top_prev = n['top_prev']
-        seg_points = top_prev
+        voxels = n['top_prev']
 
 
-        seg_labels = None
+        n['top_lat_feats'] = L.Python(
+                                name = 'top_lat_feats_input',
+                                ntop=1,
+                                include=dict(phase=caffe.TEST),
+                                python_param=dict(
+                                module='bcl_layers',
+                                layer='LatticeFeature',
+                                param_str=repr(dataset_params_eval)
+                                ))
+        coors = n['top_lat_feats']
+
         cls_labels = None
         reg_targets = None
 
 
-    n, output = segmentation(n, seg_points, seg_labels, phase)
+    # n, output = segmentation(n, seg_points, seg_labels, phase)
+    #
+    # if phase == "eval":
+    #     car_points = output
 
-    if phase == "eval":
-        car_points = output
+    n = object_detection(n, voxels, coors, cls_labels, reg_targets, phase)
 
     print(n)
     return n.to_proto()

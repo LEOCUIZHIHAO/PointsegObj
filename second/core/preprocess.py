@@ -34,12 +34,41 @@ class BatchSampler:
         self._drop_reminder = drop_reminder
 
     def _sample(self, num):
-        if self._idx + num >= self._example_num:
-            ret = self._indices[self._idx:].copy()
-            self._reset()
-        else:
-            ret = self._indices[self._idx:self._idx + num]
-            self._idx += num
+        ############## New Sampler
+        # OPTIMIZE: Better algorithm
+        hard = 100 # less than 100 point is consider hard gt box
+        hard_ratio = 0.6
+        easy_num = int(np.ceil(num*(1-hard_ratio)))
+        hard_num = int(num*hard_ratio)
+        sample_indexes = []
+        # loop from self._idx to length of indices
+        init_idx = self._idx
+        if num == 0:
+            return self._indices[self._idx]
+        for i in range(init_idx, len(self._indices)):
+            data_base_idx = self._indices[i]
+            # Obtain number of points in a sampled gt box
+            points_in_gt = self._sampled_list[data_base_idx]["num_points_in_gt"]
+            if points_in_gt < hard and hard_num != 0:
+                sample_indexes.append(data_base_idx)
+                hard_num -= 1
+            elif points_in_gt >= hard and easy_num != 0:
+                sample_indexes.append(data_base_idx)
+                easy_num -= 1
+            elif hard_num + easy_num == 0:
+                break
+            if i == len(self._indices)-1:
+                self._reset()
+                break
+            self._idx += 1
+        ret = self._indices[sample_indexes]
+        ###############Old car sampler
+        # if self._idx + num >= self._example_num:
+        #     ret = self._indices[self._idx:].copy()
+        #     self._reset()
+        # else:
+        #     ret = self._indices[self._idx:self._idx + num]
+        #     self._idx += num
         return ret
 
     def _reset(self):
@@ -603,7 +632,7 @@ def noise_per_object_v3_(gt_boxes,
         ]
     enable_grot = np.abs(global_random_rot_range[0] -
                          global_random_rot_range[1]) >= 1e-3
-    
+
     if not isinstance(center_noise_std, (list, tuple, np.ndarray)):
         center_noise_std = [
             center_noise_std, center_noise_std, center_noise_std

@@ -1,11 +1,283 @@
 from pathlib import Path
 
 import numba
+from numba import jit
+from numba import njit, prange
 import numpy as np
 from spconv.utils import rbbox_iou, rbbox_intersection
-
+from second.pytorch.core import box_torch_ops
 from second.core.geometry import points_in_convex_polygon_3d_jit, points_count_convex_polygon_3d_jit
+import torch
+import math
 
+#Jim added
+def fcos_box_encoder(points, gt_boxes):
+    _gt_boxes = gt_boxes.copy()
+    _gt_boxes[:,-1] = 0
+    gt_boxes_corners = rbbox3d_to_corners(_gt_boxes)
+    # get min max corners of a bounding box
+    gt_box_min = gt_boxes_corners[:,0]
+    gt_box_max = gt_boxes_corners[:,-2]
+    # get points within box
+    points_in_box_mask = points_in_rbbox(points, gt_boxes)
+    # Match each box to each points
+    reg_targets = np.zeros((points.shape[0], 7))
+
+    for i in range(len(gt_boxes)):
+        mask_per_box = points_in_box_mask[:,i]
+        reg_targets[mask_per_box,:3] = points[mask_per_box,:3]-gt_box_min[i]
+        reg_targets[mask_per_box,3:-1] = gt_box_max[i]-points[mask_per_box,:3]
+        reg_targets[mask_per_box,-1] = gt_boxes[i,-1]
+
+    labels = np.zeros((points.shape[0],))
+    labels[points_in_box_mask.any(-1)] = 1
+    return {"bbox_targets": reg_targets, "labels": labels, "importance": [1,1,1]}
+
+def fcos_box_decoder(points, predictions):
+    # Get max point of the box
+    min_points = points[:,:,:3] - predictions[:,:,:3]
+    max_points = points[:,:,:3] + predictions[:,:,3:-1]
+    # from bounding box max and min get bbox center
+    center_3d = min_points + (max_points-min_points)/2
+    size = max_points - min_points
+    bbox_3d = np.concatenate((center_3d, size, np.expand_dims(predictions[:,:,-1],-1)),-1)
+    return bbox_3d
+
+def fcos_box_decoder_torch(points, predictions):
+    # Get max point of the box
+    min_points = points[:,:,:3] - predictions[:,:,:3]
+    max_points = points[:,:,:3] + predictions[:,:,3:-1]
+    # from bounding box max and min get bbox center
+    center_3d = min_points + (max_points-min_points)/2
+    size = max_points - min_points
+    bbox_3d = torch.cat((center_3d, size, predictions[:,:,-1:]),-1)
+    return bbox_3d
+
+def fcos_box_encoder_v2(points, gt_boxes):
+    # Rotate points within box
+    _gt_boxes = gt_boxes.copy()
+    gt_box_rot = gt_boxes[:,-1]
+    # Constrain angle to (0, pi)
+    gt_box_rot = np.where(gt_box_rot < 0, np.pi + gt_box_rot, gt_box_rot)
+    # Offset gt box in reference to origin by subtracting box center
+    # get min max corners of a bounding box, in reference to origin
+    gt_box_max_org = _gt_boxes[:,3:-1]/2
+    gt_box_min_org = -gt_box_max_org
+    # get box center
+    box_center = gt_boxes[:,:3]
+    # get points within each box
+    _gt_boxes[:,3:5] /= 2
+    points_in_box_mask = points_in_rbbox(points, _gt_boxes)
+    # Match each box to each points
+    reg_targets = np.zeros((points.shape[0], 7))
+    # From rotated points find f,b,l,r,u,d
+    for i in range(len(gt_boxes)):
+        mask_per_box = points_in_box_mask[:,i]
+        # offset points in reference to origin
+        points_org = points[mask_per_box,:3] - box_center[i]
+        # rotate points to vertical box position
+        points_org_rot = rotation_3d_in_axis(
+                            np.expand_dims(points_org, 1),
+                            np.expand_dims(-gt_box_rot[i],1), axis = 2).squeeze()
+        # Obtain ground truth
+        reg_targets[mask_per_box,:3] = points_org_rot - gt_box_min_org[i]
+        reg_targets[mask_per_box,3:-1] = gt_box_max_org[i] - points_org_rot
+        reg_targets[mask_per_box,-1] = gt_box_rot[i]
+    # Normalize target between 0 to 1
+    reg_targets[...,:-1] = 1 - (1 / (1 + reg_targets[...,:-1]))
+    # Normalize rotation angle between 0 to 1
+    reg_targets[...,-1] = reg_targets[...,-1] / np.pi
+    # Obtain segmentation class label
+    labels = np.zeros((points.shape[0],))
+    labels[points_in_box_mask.any(-1)] = 1
+    return {"bbox_targets": reg_targets, "labels": labels, "importance": [1,1,1]}
+
+def fcos_box_decoder_v2(points, predictions):
+    # calculate true prediction from normalized prediction
+    predictions[...,:-1] = 1/(1-predictions[...,:-1]) - 1
+    predictions[...,-1] = predictions[...,-1] * np.pi
+    # Calculate box width height and length base on prediction
+    box_dim = predictions[...,:3] + predictions[...,3:-1]
+    # Obtrain unrotated point in origin
+    points_unrot = box_dim/2 - predictions[...,3:-1]
+    # Rotate points
+    points_rot = rotation_3d_in_axis(
+                        points_unrot.transpose(1,0,2),
+                        predictions[...,-1:].squeeze(), axis = 2).transpose(1,0,2)
+    # Obtain origin point to actual point offset
+    points_offset = points[...,:3] - points_rot
+    # The box center is the box offset, box dim is calculated above
+    # Last dim of prediction is the rotation prediction
+    bbox = np.concatenate((points_offset, box_dim, predictions[...,-1:]), axis = -1)
+    return bbox
+
+def fcos_box_decoder_v2_torch(points, predictions):
+    # calculate true prediction from normalized prediction
+    predictions[...,:-1] = 1/(1-predictions[...,:-1]) - 1
+    predictions[...,-1] = predictions[...,-1] * math.pi
+    # Calculate box width height and length base on prediction
+    box_dim = predictions[...,:3] + predictions[...,3:-1]
+    # Obtrain unrotated point in origin
+    points_unrot = box_dim/2 - predictions[...,3:-1]
+    # Rotate points
+    points_rot = box_torch_ops.rotation_3d_in_axis(
+                        points_unrot.permute(1,0,2),
+                        predictions[...,-1:].squeeze(), axis = 2).permute(1,0,2)
+    # Obtain origin point to actual point offset
+    points_offset = points[...,:3] - points_rot
+    # The box center is the box offset, box dim is calculated above
+    # Last dim of prediction is the rotation prediction
+    bbox = torch.cat((points_offset, box_dim, predictions[...,-1:]), -1)
+    return bbox
+
+# NOTE: For only [t,b,l,r,z,h,theta]
+def fcos_box_encoder_v3(points, gt_boxes):
+    # Rotate points within box
+    _gt_boxes = gt_boxes.copy()
+    # _gt_boxes[:,-1] = 0
+    gt_box_rot = gt_boxes[:,-1]
+    # Constrain angle to (0, pi)
+    gt_box_rot = np.where(gt_box_rot < 0, np.pi + gt_box_rot, gt_box_rot)
+    # Offset gt box in reference to origin by subtracting box center
+    # get min max corners of a bounding box, in reference to origin
+    gt_box_max_org = _gt_boxes[:,3:-1]/2
+    gt_box_min_org = -gt_box_max_org
+    # get box center
+    box_center = gt_boxes[:,:3]
+    # get points within each box
+    # change bounding box z axis to match point's
+    _gt_boxes[:,2] = -1
+    points_in_box_mask = points_in_rbbox(points, _gt_boxes)
+    # Match each box to each points
+    reg_targets = np.zeros((points.shape[0], 7))
+    # From rotated points find f,b,l,r,z,l,theta
+    for i in range(len(_gt_boxes)):
+        mask_per_box = points_in_box_mask[:,i]
+        # offset points in reference to origin
+        points_org = points[mask_per_box,:3] - box_center[i]
+        # rotate points to vertical box position
+        points_org_rot = rotation_3d_in_axis(
+                            np.expand_dims(points_org, 1),
+                            np.expand_dims(-gt_box_rot[i],1), axis = 2).squeeze()
+        # Obtain ground truth
+        reg_targets[mask_per_box,:2] = points_org_rot[...,:2] - gt_box_min_org[i][:2]
+        reg_targets[mask_per_box,2:4] = gt_box_max_org[i][:2] - points_org_rot[...,:2]
+        reg_targets[mask_per_box,4] = gt_boxes[i][2]
+        reg_targets[mask_per_box,5] = gt_boxes[i][5]
+        reg_targets[mask_per_box,-1] = gt_box_rot[i]
+    # Normalize target between 0 to 1
+    # z_norm = reg_targets[...,4]/5
+    # reg_targets[...,:-1] = 1 - (1 / (1 + reg_targets[...,:-1]))
+    # reg_targets[...,4] = z_norm
+    # Offset Z axis to positive
+    reg_targets[...,4] += 3
+    # reg_targets = 1 - (1 / (1 + reg_targets))
+    # reg_targets = np.power((1 - 1/(1+reg_targets)),2)
+    reg_targets = np.square(1 - 1/(1+reg_targets))
+    # Normalize rotation angle between 0 to 1
+    # reg_targets[...,-1] = reg_targets[...,-1] / np.pi
+    # reg_targets[...,-1] = reg_targets[...,-1] / np.pi
+    # Obtain segmentation class label
+    labels = np.zeros((points.shape[0],))
+    labels[points_in_box_mask.any(-1)] = 1
+    return {"bbox_targets": reg_targets, "labels": labels, "importance": [1,1,1]}
+def fcos_box_decoder_v3(points, predictions):
+    # calculate true prediction from normalized prediction
+    predictions = 1/(1-np.sqrt(predictions)) - 1
+    predictions[...,4] -= 3
+    # z_unnorm = predictions[...,4]*5
+    # predictions[...,:-1] = 1/(1-predictions[...,:-1]) - 1
+    # predictions[...,-1] = predictions[...,-1] * np.pi
+    # predictions[...,4] = z_unnorm
+    # Calculate box width height and length base on prediction
+    box_dim = predictions[...,:2] + predictions[...,2:4]
+    box_dim = np.concatenate((box_dim, predictions[...,5:6]), axis=-1)
+    # Obtrain unrotated point in origin
+    points_unrot = box_dim[...,:2]/2 - predictions[...,2:4]
+    points_unrot = np.concatenate((points_unrot, predictions[...,4:5]), axis=-1)
+    # Rotate points
+    points_rot = rotation_3d_in_axis(
+                        points_unrot.transpose(1,0,2),
+                        predictions[...,-1:].squeeze(), axis = 2).transpose(1,0,2)
+    # Obtain origin point to actual point offset
+    points_offset = points[...,:2] - points_rot[...,:2]
+    # The box center is the box offset, box dim is calculated above
+    # Last dim of prediction is the rotation prediction
+    bbox = np.concatenate((points_offset, points_rot[...,2:3], box_dim, predictions[...,-1:]), axis = -1)
+    return bbox
+def fcos_box_decoder_v3_torch(points, predictions):
+    # calculate true prediction from normalized prediction
+    predictions = 1/(1-torch.sqrt(predictions)) - 1
+    predictions[...,4] -= 3
+    # z_unnorm = predictions[...,4]*5
+    # predictions[...,:-1] = 1/(1-predictions[...,:-1]) - 1
+    # predictions[...,-1] = predictions[...,-1] * math.pi
+    # predictions[...,4] = z_unnorm
+    # Calculate box width height and length base on prediction
+    box_dim = predictions[...,:2] + predictions[...,2:4]
+    box_dim = torch.cat((box_dim, predictions[...,5:6]), -1)
+    # Obtrain unrotated point in origin
+    points_unrot = box_dim[...,:2]/2 - predictions[...,2:4]
+    points_unrot = torch.cat((points_unrot, predictions[...,4:5]), -1)
+    # Rotate points
+    points_rot = box_torch_ops.rotation_3d_in_axis(
+                        points_unrot.permute(1,0,2),
+                        predictions[...,-1:].squeeze(), axis = 2).permute(1,0,2)
+    # Obtain origin point to actual point offset
+    points_offset = points[...,:2] - points_rot[...,:2]
+    # The box center is the box offset, box dim is calculated above
+    # Last dim of prediction is the rotation prediction
+    bbox = torch.cat((points_offset, points_rot[...,2:3], box_dim, predictions[...,-1:]), -1)
+    return bbox
+
+def points_to_3dvoxel(points, feat_size = [100,80,10], max_voxels = 8000,
+                        point_cloud_range = [0, -40, -3, 70.4, 40, 1],
+                        num_p_voxel = 200):
+    point_cloud_range = np.array(point_cloud_range)
+    feat_size = np.array(feat_size)
+    # NOTE: (x_r, y_r, z_r)/(h, w, d)
+    voxel_size = (point_cloud_range[3:]-point_cloud_range[:3])/feat_size
+    voxels = np.zeros((1, 4, num_p_voxel, max_voxels), dtype=np.float32)
+    coords = np.zeros((max_voxels, 3))
+    # (h, w, d)
+    points_in_voxel = np.zeros((feat_size[0], feat_size[1], feat_size[2]), dtype=np.int_)
+    p2voxel_idx = np.zeros((len(points), 3), dtype=np.int_)
+    offset = np.array(point_cloud_range[:3])
+    # (h, w, d) = (x, y, z)-(x_f, y_f, z_f)/(x_s, y_s, z_s)
+    indices = np.floor((points[:,:3]-offset)/voxel_size).astype(np.int_)
+    indices_to_voxel_idx = -np.ones((feat_size[0], feat_size[1], feat_size[2]), dtype=np.int_)
+    voxels, coords, p2voxel_idx=to_voxel(points, voxels, coords, indices, points_in_voxel,
+                                    indices_to_voxel_idx, p2voxel_idx, num_p_voxel,max_voxels)
+    # # NOTE: May have problem in indexing here
+    # p2voxel_idx = p2voxel_idx[(p2voxel_idx!=0).any(-1)]
+
+    # (h, w, z) * (x_s, y_s, z_s) + (x, y, z) + (x, y, z)/2
+    coords_center = (coords * voxel_size + offset) + voxel_size/2
+
+    return voxels, coords, coords_center, p2voxel_idx
+
+@njit#(nopython=True)#, parallel=True)
+def to_voxel(points, voxels, coords, indices, points_in_voxel,indices_to_voxel_idx,
+                                                        p2voxel_idx, num_p_voxel,max_voxels):
+    voxel_num = 0
+    for idx in prange(len(indices)):
+        feat_index = indices[idx]
+        num = points_in_voxel[feat_index[0],feat_index[1],feat_index[2]]
+        voxel_idx = indices_to_voxel_idx[feat_index[0],feat_index[1],feat_index[2]]
+        if voxel_idx == -1:
+            voxel_idx = voxel_num
+            voxel_num += 1
+            if voxel_num >= max_voxels:
+                break
+            indices_to_voxel_idx[feat_index[0], feat_index[1], feat_index[1]] = voxel_idx
+            coords[voxel_idx] = feat_index
+        if num < num_p_voxel:
+            points_in_voxel[feat_index[0],feat_index[1],feat_index[2]] += 1
+            voxels[:,:,num,voxel_idx] = points[idx]
+            p2voxel_idx[idx, 0] = num
+            p2voxel_idx[idx, 1] = voxel_idx
+            p2voxel_idx[idx, 2] = idx
+    return voxels, coords, p2voxel_idx
 
 def riou_cc(rbboxes, qrbboxes, standup_thresh=0.0):
     # less than 50ms when used in second one thread. 10x slower than gpu
@@ -401,7 +673,6 @@ def center_to_corner_box3d(centers,
     corners += centers.reshape([-1, 1, 3])
     return corners
 
-
 def center_to_corner_box2d(centers, dims, angles=None, origin=0.5):
     """convert kitti locations, dimensions and angles to corners.
     format: center(xy), dims(xy), angles(clockwise when positive)
@@ -793,6 +1064,18 @@ def remove_outside_points(points, rect, Trv2c, P2, image_shape):
     indices = points_in_convex_polygon_3d_jit(points[:, :3], frustum_surfaces)
     points = points[indices.reshape([-1])]
     return points
+
+def remove_out_pc_range_points(points, pc_range):
+
+    pts_x, pts_y, pts_z = points[:, 0], points[:, 1], points[:, 2]
+
+    range_flag = np.logical_and((pts_x > pc_range[0]) , (pts_x < pc_range[3])) \
+                 & np.logical_and((pts_y > pc_range[1]), (pts_y < pc_range[4])) \
+                 & np.logical_and((pts_z > pc_range[2]), (pts_z < pc_range[5]))
+    points = points[range_flag]
+
+    return points
+
 
 def split_points_in_boxes(points, boxes):
     masks = points_in_rbbox(points, boxes)

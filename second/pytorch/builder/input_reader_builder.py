@@ -55,7 +55,8 @@ def build(input_reader_config,
           generate_anchors_cachae=True, #True for pillar and second
           segmentation=False,
           bcl_keep_voxels=None,
-          seg_keep_points=None) -> DatasetWrapper:
+          seg_keep_points=None,
+          points_per_voxel=None) -> DatasetWrapper:
     """Builds a tensor dictionary based on the InputReader config.
 
     Args:
@@ -81,6 +82,7 @@ def build(input_reader_config,
         generate_anchors_cachae=generate_anchors_cachae,
         segmentation=segmentation,
         bcl_keep_voxels=bcl_keep_voxels,
-        seg_keep_points=seg_keep_points) #f use cachae save memory but not suit for BCL
+        seg_keep_points=seg_keep_points,
+        points_per_voxel=points_per_voxel) #f use cachae save memory but not suit for BCL
     dataset = DatasetWrapper(dataset)
     return dataset

@@ -19,6 +19,8 @@ from second.utils.timer import simple_timer
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+import os
+
 def SimpleVoxel(voxels, num_points):
     points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / num_points.reshape(-1,1,1) #zyxr if fixed container add 1e-5
     # points_mean = np.sum(voxels[:, :, :], axis=1, keepdims=True) / (num_points.reshape(-1,1,1))
@@ -294,6 +296,7 @@ def prep_pointcloud(input_dict,
                     bcl_keep_voxels=6500, #6000~8000 pillar
                     seg_keep_points=8000,
                     points_per_voxel=200,
+                    feature_map_size=[1, 200, 176],
                     num_anchor_per_loc=2,
                     segmentation=False,
                     object_detection=True):
@@ -471,14 +474,9 @@ def prep_pointcloud(input_dict,
             [n in class_names for n in gt_dict["gt_names"]], dtype=np.bool_)
         _dict_select(gt_dict, gt_boxes_mask)
 
-        #for prior seg net
-        # points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
-        # points_in_box, points_out_box = SamplePointsKeepALLPositive(points_in_box, points_out_box, seg_keep_points, num_point_features) #fixed points
-        # data, label = PrepDataAndLabel(points_in_box, points_out_box)
-
-        #for bcl_net
-        data = PointRandomChoiceV2(points, seg_keep_points)
-        label = None
+        points_in_box, points_out_box = box_np_ops.split_points_in_boxes(points, gt_dict["gt_boxes"]) #xyzr
+        points_in_box, points_out_box = SamplePointsKeepALLPositive(points_in_box, points_out_box, seg_keep_points, num_point_features) #fixed points
+        data, label = PrepDataAndLabel(points_in_box, points_out_box)
 
         example = {
         'seg_points': data, #data
@@ -486,6 +484,22 @@ def prep_pointcloud(input_dict,
         'gt_boxes' : gt_dict["gt_boxes"],
         'image_idx' : input_dict['metadata']['image_idx'],
         }
+
+        ################# For feature map Focs
+        # # # NOTE: For feature map Focs
+        point_cloud_range = np.array(voxel_generator.point_cloud_range)
+        anchor_strides = (point_cloud_range[3:] - point_cloud_range[:3]) / feature_map_size[::-1]
+        anchor_offsets = point_cloud_range[:3] + anchor_strides / 2
+        centers = box_np_ops.create_anchors_3d_stride(feature_map_size,
+                                            anchor_strides = anchor_strides,
+                                            anchor_offsets = anchor_offsets,
+                                            rotations=[0])
+        centers = centers.squeeze()[...,:3].reshape(-1,3)
+        example.update({
+            'coords_center': centers, # if anchors free the 0 is the horizontal/vertical anchors
+        })
+        ##############
+
         ################ Fcos & points to voxel Test
         # NOTE: For voxel seg net
         # _, coords, coords_center, p2voxel_idx = box_np_ops.points_to_3dvoxel(data,
@@ -551,23 +565,56 @@ def prep_pointcloud(input_dict,
         'gt_boxes': gt_dict["gt_boxes"],
         }
 
+        ################# For feature map Focs
+        # # NOTE: For feature map Focs
+        point_cloud_range = np.array(voxel_generator.point_cloud_range)
+        anchor_strides = (point_cloud_range[3:] - point_cloud_range[:3]) / feature_map_size[::-1]
+        anchor_offsets = point_cloud_range[:3] + anchor_strides / 2
+        centers = box_np_ops.create_anchors_3d_stride(feature_map_size,
+                                            anchor_strides = anchor_strides,
+                                            anchor_offsets = anchor_offsets,
+                                            rotations=[0])
+        centers = centers.squeeze()[...,:3].reshape(-1,3)
+        targets_dict = box_np_ops.fcos_box_encoder_v2(centers, gt_dict["gt_boxes"])
+        # bbox = box_np_ops.fcos_box_decoder_v2(np.expand_dims(centers, 0),
+        #                                 np.expand_dims(targets_dict["bbox_targets"], 0))
+        # labels = targets_dict["labels"]
+        # with open(os.path.join('./debug_tool',"points.pkl") , 'wb') as f:
+        #     pickle.dump(data,f)
+        # with open(os.path.join('./debug_tool',"seg_points.pkl") , 'wb') as f:
+        #     pickle.dump(centers[labels==1],f)
+        # with open(os.path.join('./debug_tool',"pd_boxes.pkl") , 'wb') as f:
+        #     pickle.dump(bbox.squeeze()[labels==1],f)
+        # with open(os.path.join('./debug_tool',"gt_boxes.pkl") , 'wb') as f:
+        #     pickle.dump(gt_dict["gt_boxes"],f)
+        # exit()
+        example.update({
+            'labels': targets_dict['labels'], # if anchors free the 0 is the horizontal/vertical anchors
+            # 'seg_labels': targets_dict['labels'], # if anchors free the 0 is the horizontal/vertical anchors
+            'reg_targets': targets_dict['bbox_targets'], # target assign get offsite
+            'importance': targets_dict['importance'],
+            # 'reg_weights': targets_dict['bbox_outside_weights'],
+        })
+        ##############
+
         ################ Fcos & points to voxel
         # NOTE: For voxel seg net
         # _, coords, coords_center, p2voxel_idx = box_np_ops.points_to_3dvoxel(data,
-        #                                         feat_size=[100,80,10],
+        #                                         feat_size=[200,176,10],
         #                                         max_voxels=bcl_keep_voxels,
         #                                         num_p_voxel=points_per_voxel)
-        # targets_dict = box_np_ops.fcos_box_encoder_v2(coords_center, gt_dict["gt_boxes"])
+        #
+        # targets_dict = box_np_ops.fcos_box_encoder_v2(coords_center,
+        #                                     gt_dict["gt_boxes"])
         # # Jim added
-        # example = {
-        # 'seg_points': data, #data
-        # 'seg_labels': label,
+        # example.update({
         # 'coords': coords,
         # 'p2voxel_idx': p2voxel_idx,
         # 'cls_labels': targets_dict['labels'], # if anchors free the 0 is the horizontal/vertical anchors
         # 'reg_targets': targets_dict['bbox_targets'], # target assign get offsite
         # 'importance': targets_dict['importance'],
-        # }
+        # })
+        ################ Fcos & points to voxel
 
         ################ Fcos & points to voxel
         if anchor_cache is not None:

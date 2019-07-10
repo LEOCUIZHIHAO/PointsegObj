@@ -40,7 +40,8 @@ def build(input_reader_config,
           generate_anchors_cachae=True, #True for pillar and second
           segmentation=False,
           bcl_keep_voxels=None,
-          seg_keep_points=None):
+          seg_keep_points=None,
+          points_per_voxel=None):
     """Builds a tensor dictionary based on the InputReader config.
 
     Args:
@@ -139,7 +140,8 @@ def build(input_reader_config,
                         anchor_cache=anchor_cache,
                         segmentation=segmentation,
                         bcl_keep_voxels=bcl_keep_voxels,
-                        seg_keep_points=seg_keep_points)
+                        seg_keep_points=seg_keep_points,
+                        points_per_voxel=points_per_voxel)
 
     dataset = dataset_cls(
         info_path=dataset_cfg.kitti_info_path,

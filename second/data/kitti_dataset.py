@@ -55,6 +55,9 @@ class KittiDataset(Dataset):
             label_preds = det["label_preds"].detach().cpu().numpy()
             scores = det["scores"].detach().cpu().numpy()
             if final_box_preds.shape[0] != 0:
+                # print("final_box_preds: ", final_box_preds)
+                # print(type(final_box_preds))
+                # print(final_box_preds.shape)
                 final_box_preds[:, 2] -= final_box_preds[:, 5] / 2
                 box3d_camera = box_np_ops.box_lidar_to_camera(
                     final_box_preds, rect, Trv2c)
@@ -111,7 +114,7 @@ class KittiDataset(Dataset):
         detection
         When you want to eval your own dataset, you MUST set correct
         the z axis and box z center.
-        If you want to eval by my KITTI eval function, you must 
+        If you want to eval by my KITTI eval function, you must
         provide the correct format annotations.
         ground_truth_annotations format:
         {
